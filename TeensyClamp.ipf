@@ -163,6 +163,7 @@ function startGUI(comStr)
 	Label/W=$(panelN+"#"+graphN) bottom,"Read time (from connection start, s \\E)"
 	Label/W=$(panelN+"#"+graphN) left,"mV\\u#2"
 	Label/W=$(panelN+"#"+graphN) right,"pA\\u#2"
+	setaxis/A=2 left; setaxis/A=2 right;
 	
 	//add checkboes
 	num = itemsinlist(checkboxes)
@@ -424,11 +425,14 @@ end
 
 
 //main update function -- sends settings to teensy and also updates GUI based on changes to settings
-function teensy_gui_sendSettings(panelN,bypassNonLiveMode,[customSettingsWv,forStreaming])
+//return 0 if failed to start background function, 1 if started successfully
+function teensy_gui_sendSettings(panelN,bypassNonLiveMode,[customSettingsWv,noReceiveBg])
 	String panelN	//name of panel for which to send updates
 	Variable bypassNonLiveMode		//if 0: updates are only sent to the teensy if Live updates checkbox is checked [standard use]. If 1: updates are sent to the teensy no matter the status [expected to be reserved for a shift click of that box]
 	WAVE customSettingsWv	//bypass to send a custom settings wv. This is currently used for sending calibration data
-	int forStreaming			//if passing a customSettingsWv that will activate streaming, pass this to set up the background function to keep listening for serial input from teensy
+	Variable noReceiveBg
+	
+	noReceiveBg = !ParamIsDefault(noReceiveBg) && noReceiveBg
 	
 	if (!bypassNonLiveMode)		//check live updates checkbox
 		controlinfo/W=$panelN liveUpdating
@@ -444,12 +448,7 @@ function teensy_gui_sendSettings(panelN,bypassNonLiveMode,[customSettingsWv,forS
 	endif
 	teensy_gui_updateLeakRel(panelN)	
 	
-	//handle special case of streaming
-	if (!ParamIsDefault(customSettingsWv) && !ParamIsDefault(forStreaming) && forStreaming)
-		return teensy_sendOneSetOfFloats(panelN,settingsWv,0,0,streaming=1)
-	endif
-	
-	return teensy_sendOneSetOfFloats(panelN,settingsWv,0,0)		//send if not busy and start polling for teensy response
+	return teensy_sendOneSetOfFloats(panelN,settingsWv,0,0,noReceiveBg=noReceiveBg)		//send if not busy and start polling for teensy response
 end
 
 //get a wave summarizing the status of GUI settings
@@ -547,7 +546,7 @@ function teensy_gui_setArbitraryIv(panelN,newIvWv)
 end
   
 //labels as list for use when starting the wave (way back in teensy_clamp()) -- should agree with send order in report() in main ino sketch
-static strconstant ks_teensyReportLbls="receiveStatus;lastReadMillis;lastVm;lastVmPinReading;lastArbitraryMultiplier;conductanceMultiplier12bit;lastLeakCurrent;lastArbitraryCurrent_scaled;lastTotalCurrent;current_cmd12bit;dt_mean;dt_var;dt_min;dt_max;calibrationDataReceivedCount;lastDt;"
+static strconstant ks_teensyReportLbls="receiveStatus;lastReadMillis;lastVm;lastVmPinReading;lastArbitraryMultiplier;conductanceMultiplier12bit;lastLeakCurrent;lastArbitraryCurrent_scaled;lastTotalCurrent;lastConvolutionResult;dt_mean;dt_var;dt_min;dt_max;calibrationDataReceivedCount;lastDt;"
 static strconstant ks_additionalStatusLbls="dt_sdev;lastReadSecs;"		//currently we just convert dt_variance to sdev and lastReadMillis to secs
 static constant k_numAdditionalStatusLbls=2
 static constant k_defaultSecsOnGraphAxis = 5
@@ -894,28 +893,19 @@ end
 static constant k_pollingFrequency_ticks = 1		//poll as quickly as possible, every ~6 ms
 static constant k_backgroundWaitTimeLimit_ticks = 600		//wait only up to 4 secs (Was getting some time-out at 2s)
 static strconstant ks_teensyFloatRespBgTaskStartStr = "teensyFloatRespBgTask_"
-function teensy_sendOneSetOfFloats(panelN,wv,ignoreWaitingForResponse,doNotClearWaitingStatus,[noReceiveBg,streaming])
+function teensy_sendOneSetOfFloats(panelN,wv,ignoreWaitingForResponse,doNotClearWaitingStatus,[noReceiveBg])
 	String panelN	//teensy GUI panelN
 	WAVE wv
 	int ignoreWaitingForResponse		//pass 1 to ignore waiting for response -- should be used with extreme caution. Intended for leaving the busy signal on during multiple sends, like the i(v) relation
 	int doNotClearWaitingStatus		//pass 1 in order to NOT clear waiting status after finishing read from teensy -- should also be used w/ extreme caution. Also intended for leaving busy signal on during multiple sends
 	int noReceiveBg		//pass 1 to avoid starting a background function to poll for results
-	int streaming		//with receiveBg, sets the background task to continue polling for data (default is stop after 1)
 	
 	int doReceiveBg = paramisdefault(noReceiveBg) || !noReceiveBg
-	streaming = !ParamIsDefault(streaming) && streaming
 	
 	if (strlen(panelN) < 1)
 		panelN = winname(0,64)	//top panel
 	endif
 	
-	//stop background task if running (would be from on-going streaming)
-	String taskName = ks_teensyFloatRespBgTaskStartStr+panelN		
-	String bgTasks = background_getTaskList()
-	int taskExists = whichlistitem(taskName,bgTasks) >= 0
-	if (taskExists)	//might not actually be running but just in case
-		CtrlNamedBackground $taskName,period=k_pollingFrequency_ticks,proc=teensy_gui_serialPollBg,stop
-	endif
 	
 	int numToSend = dimsize(wv,0)
 	if (numToSend != k_floatsPerStandardDataTransfer)
@@ -929,6 +919,9 @@ function teensy_sendOneSetOfFloats(panelN,wv,ignoreWaitingForResponse,doNotClear
 	endif
 		
 	if (doReceiveBg)
+		String taskName = ks_teensyFloatRespBgTaskStartStr+panelN		
+		String bgTasks = background_getTaskList()
+		int taskExists = whichlistitem(taskName,bgTasks) >= 0
 		//create the task if it doesnt exist
 		if (!taskExists)
 			CtrlNamedBackground $taskName,period=k_pollingFrequency_ticks,proc=teensy_gui_serialPollBg,start=0		//do not start polling immediately
@@ -947,7 +940,7 @@ function teensy_sendOneSetOfFloats(panelN,wv,ignoreWaitingForResponse,doNotClear
 	endif
 	
 	if (!doReceiveBg)		//all done if dont need to start background task
-		return 0
+		return 1
 	endif
 	
 	teensy_gui_setResponseWaitStatus(panelN,1)		//set to busy/waiting for response -- this will be set to zero when the background task ends
@@ -959,7 +952,6 @@ function teensy_sendOneSetOfFloats(panelN,wv,ignoreWaitingForResponse,doNotClear
 	sprintf ticksStr,"%d",currTicks
 	setwindow $panelN,userdata(serialPollBg_startTicks)=ticksStr
 	setwindow $panelN,userdata(serialPollBg_doNotClearWaitingStatus)=num2str(doNotClearWaitingStatus)
-	setwindow $panelN,userdata(streaming) = num2str(streaming)
 	
 	//start (or re-start) polling
 	CtrlNamedBackground $taskName,start=1
@@ -1015,10 +1007,9 @@ function teensy_gui_serialPollBg(s)
 	String panelN =removelistitem(0,s.name,"_")
 	int startTicks = str2num(GetUserData(panelN,"","serialPollBg_startTicks"))
 	int bgPollCount = str2num(GetUserData(panelN,"","bgPollCount"))
-	int streaming = str2num(getUserdata(panelN,"","streaming"))  //determines whether to stop after receive or keep listening
-	//check for time out unless streaming
+	//check for time out
 	int currTicks = ticks;
-	if ( !streaming && (currTicks-startTicks) > k_backgroundWaitTimeLimit_ticks)
+	if ( (currTicks-startTicks) > k_backgroundWaitTimeLimit_ticks)
 		teensy_gui_postMessage(panelN,"teensy_gui_serialPollBg() unexpected TIME OUT before receiving teensy response! # poll attempts beforehand="+num2str(bgPollCount),1)
 		//print "startTicks",startTicks,"currTicks",currTicks,"diff",currTicks-startTicks,"limit ticks",k_backgroundWaitTimeLimit_ticks
 		teensy_gui_setResponseWaitStatus(panelN,0)
@@ -1067,10 +1058,6 @@ function teensy_gui_serialPollBg(s)
 		teensy_gui_setResponseWaitStatus(panelN,0)
 	endif
 	
-	if (streaming)
-		return 0 //cotinue task
-	endif
-	
 	return 1	//stop task	
 		
 end
@@ -1116,21 +1103,47 @@ function teensy_gui_sendCalibration(panelN,bypassNonLiveMode)
 	teensy_gui_sendSettings(panelN,bypassNonLiveMode,customSettingsWv=calTemp)
 end
 
-static constant k_stream_typeNum = 3 //must match expected spcial case type number in sketch
-function teensy_gui_stream(panelN) 
-	String panelN		//starts a background task that confirms successful send
-	int bypassNonLiveMode		//passing 1 only recommended if you are sure you know what you're doing!
+static constant k_recordStep_typeNum = 3		//must match expected spcial case type number in sketch
+function teensy_gui_recordStep(panelN,stepMicros,baselineCurrent,stepCurrent)
+	String panelN
+	int stepMicros		//microseconds at which step starts. available precision is that of clamp steps (3-5 microseconds)
+	Variable baselineCurrent		//pre-step current
+	Variable stepCurrent	//current during step
 	
 	if (strlen(panelN) < 1)
 		panelN = winname(0,64)	//top panel
 	endif
+	String comStr = getUserData(panelN,"","comStr")
+	String folderPath = "root:Packages:"+panelN
 	
-	make/o/d/n=(16) sendWv = nan
-	sendWv[2] = k_stream_typeNum
+	make/o/n=(16) sendWv
+	sendWv[0,1] = nan; sendWv[2] = k_recordStep_typeNum;
+	sendWv[3] = stepMicros
+	sendWv[4] = baselineCurrent
+	sendWv[5] = stepCurrent
+	sendWv[6,]=nan
+	print "sendWv",sendWv
+	
+	int sent = teensy_gui_sendSettings(panelN,1,customSettingsWv=sendWv,noReceiveBg=1)
+	if (!sent)
+		print "teensy_gui_recordStep() did not proceed, likely because teensy is busy"
+		return 0
+	endif
+	
+	WAVE responses = teensy_readDuringExecution(comStr,nan)
+	int totalData = responses[0]	
+	int numSteps = floor((totalData - 1)/2)
+	duplicate/o/r=[1,1+numSteps-1] responses,$(folderPath+":lastStepDts")/wave=lastStepDts
+	duplicate/o/r=[1+numSteps,1+2*numSteps-1] responses,$(folderPath+":lastStepVoltageResp")/wave=lastStepVoltageResp
+	
+	//unwrap timing
+	lastStepDts[0] = 0
+	lastStepDts[1,] = lastStepDts[p-1] + lastStepDts[p]
+	
+	teensy_gui_sendSettings(panelN,1)		//I dont know why, but sending a settings update helps if the user is going to run this twice in a row
+														//running it twice in a row is likely (e.g., if tweaking a setting like min and max current
 
-	return teensy_gui_sendSettings(panelN,1,customSettingsWv=sendWv,forStreaming=1)
-end
-
+end 
 
 #if (exists("fdaqmx_writechan"))		//only compile of daq procs are available via the xop	
 
@@ -1716,7 +1729,7 @@ static constant k_reportFrequency_steps = 15		//how often to print what's going 
 static constant k_numSteps = 10000
 static constant k_serialLimitBytes = 64;
 static constant k_aecFilterTargetStepMicros = 10	//should match corresponding ino sketch targetStepMicros
-static constant k_aec_fitEndX = 0.25 //0.25// inf //0.25		//seconds to fit; to fit entire kernel, use inf
+static constant k_aec_fitEndX = inf //0.25// inf //0.25		//seconds to fit; to fit entire kernel, use inf
 static constant k_noiseRun_typeNum = 1		//must match special case type for running noise in sketch
 function/S teensy_gui_aec(panelN,nAvg,noiseMin_pA,noiseMax_pA,postCmd_pA)
 	String panelN
@@ -1729,6 +1742,7 @@ function/S teensy_gui_aec(panelN,nAvg,noiseMin_pA,noiseMax_pA,postCmd_pA)
 	endif
 	
 	String folderPath = "root:Packages:"+panelN
+	String comStr = getuserdata(panelN,"","comStr")
 		
 	make/free/o/n=(k_floatsPerStandardDataTransfer)/free settingsWv;	
 	//for serial handling in teensy, points 0 and 1 nan, two specifies this is a noise transfer
@@ -1741,9 +1755,8 @@ function/S teensy_gui_aec(panelN,nAvg,noiseMin_pA,noiseMax_pA,postCmd_pA)
 	make/o/free/n=(1)/d  currentTemp,voltageTemp,ccTemp_td		//assigned after first iteration, need to be declared for compilation
 	make/o/c/free/n=(1) ccTemp_fd //assigned after first iteration, need to be declared for compilation
 
-	make/o/d/n=(16)/free respWv
-	int readStartPos,dataCount,minTotalDataExpected,endInd
-	int dataStartPos,worstStepOvershoot,badStepCount,numSteps		//received from teensy
+	Variable respFloat
+	Double meanVal
 	int crossCorrDur_micros	
 	int i,endIteration = nAvg+1		//go one extra in order to cross correlate last one
 	for (i=0;i<endIteration;i++)
@@ -1772,43 +1785,19 @@ function/S teensy_gui_aec(panelN,nAvg,noiseMin_pA,noiseMax_pA,postCmd_pA)
 		
 		
 		//wait for response and then read it
-		dataCount = 0
-		do
-			if (teensy_bytesAvailable(ks_teensyCom) < 1)
-				continue	//wait for data --unclear to me exactly how usb serial buffering will handle the possible overload from teensy
-			endif
-			VDTReadBinaryWave2/B/O=(k_vdtReadInternalTimeOutSecs)/Q/TYPE=(2) respWv
-			//print "respWv",respWv
-			if (dataCount < 1)
-				dataStartPos=respWv[0]
-				badStepCount=respWv[1]
-				worstStepOvershoot=respWv[2]
-				numSteps=respWv[3]
-				crossCorrDur_micros=respWv[4]
-				minTotalDataExpected = 2*numSteps
-				
-				//print "iteration",i,"numSteps",numSteps,"badStepCount",badStepCount,"worstStepOvershoot",worstStepOvershoot,"badSteps/numSteps",badStepCount/numSteps
-				
-				if (i==0)
-					make/o/d/n=(minTotalDataExpected) outTemp;		//redimension will split into injected current and vm cols later
-				endif
-				readStartPos = 5
-			else
-				readStartPos = 0
-			endif
-			
-			endInd = min(dataCount+k_floatsPerStandardDataTransfer-readStartPos,minTotalDataExpected)-1
-			outTemp[dataCount,endInd]=respWv[readStartPos+p-dataCount]
-			dataCount += k_floatsPerStandardDataTransfer - readStartPos
-		while (dataCount < minTotalDataExpected)
-		
-		duplicate/o/r=[0,numSteps-1]/free outTemp,currentTemp
-		duplicate/o/r=[numSteps,]/free outTemp,voltageTemp
+		WAVE responses = teensy_readDuringExecution(comStr,nan)
+		int totalData = responses[0]
+		int badStepCount = responses[1]
+		int worstStepOvershoot = responses[2]
+		int numSteps = floor( (totalData-3)/2)
+		duplicate/o/r=[3,3+numSteps-1]/free responses,currentTemp
+		duplicate/o/r=[3+numSteps,3+2*numSteps-1]/free responses,voltageTemp
 		
 		//scale to real values //teensy_gui_bit2vmOrVm2bit teensy_gui_current2bitOrBit2Current
 		currentTemp = teensy_gui_current2bitOrBit2Current(panelN,currentTemp,1)
 		voltageTemp = teensy_gui_bit2vmOrVm2bit(panelN,voltageTemp,0)
-		
+		meanval = mean(currentTemp); matrixop/o currentTemp = currentTemp - meanVal
+		meanval = mean(voltageTemp); matrixop/o voltageTemp = voltageTemp - meanVal
 	
 		if (i==0)
 			duplicate/o/free currentTemp,outCurrent
@@ -1818,7 +1807,7 @@ function/S teensy_gui_aec(panelN,nAvg,noiseMin_pA,noiseMax_pA,postCmd_pA)
 			concatenate/np=1 {voltageTemp},outVoltage
 		endif
 	
-		infoStr+= "dataStartPos:"+num2str(dataStartPos)+";badStepCount:"+num2str(badStepCount)+";worstStepOvershoot:"+num2str(worstStepOvershoot)+";numSteps:"+num2str(numSteps)+";crossCorrDur_micros:"+num2str(crossCorrDur_micros)+";\r"
+		infoStr+= "numSteps:"+num2str(badStepCount)+";worstStepOvershoot:"+num2str(worstStepOvershoot)+";numSteps:"+num2str(numSteps)+";crossCorrDur_micros:"+num2str(crossCorrDur_micros)+";\r"
 		vdt2/p=$ks_teensycom killio //the count is imperfect because some data is often remaining in queue
 	endfor
 	
@@ -1826,8 +1815,8 @@ function/S teensy_gui_aec(panelN,nAvg,noiseMin_pA,noiseMax_pA,postCmd_pA)
 	make/o/d/n=(1) $(folderPath+":aec_fullKernel")/wave=aec_fullKernel
 	matrixop/o aec_fullKernel = sumRows(cc_td)/numcols(cc_td)		//calculate average, for more detail use: //wave_colStats(cc_td,0,inf,0,inf,out_filter)
 	setscale/p x,0,k_aecFilterTargetStepMicros*10^-6,"s",aec_fullKernel
-	Double baselineVal = aec_fullKernel[0]
-	aec_fullKernel -= baselineVal		//baseline subtract
+	//Double baselineVal = min(aec_fullKernel[0],aec_fullKernel[1])		//deals with offsets from practical experience so far
+	//aec_fullKernel -= baselineVal		//baseline subtract
 	
 	teensy_aecCalc(panelN,k_aec_fitEndX,1,1)   //decomposes full kernel into electrode and membrane kernels, stores them
 																		  //in panel Package folder as aec_membraneKernel and aec_electrodeKernel
@@ -1840,6 +1829,37 @@ function/S teensy_gui_aec(panelN,nAvg,noiseMin_pA,noiseMax_pA,postCmd_pA)
 	return getwavesdatafolder(aec_fullKernel,2) //return wave name including full path
 end
 
+function/WAVE teensy_readDuringExecution(comStr,num)		//for use with teensy code sendFloat or sendFloats
+	String comStr
+	variable num		//if length is being sent by teensy (must be first position), then pass nan
+	
+	if (strlen(comStr) < 1)
+		comstr = ks_teensycom
+	endif
+	
+	int dataCount = 0
+	Variable respFloat
+	do
+		if (teensy_bytesAvailable(ks_teensyCom) < 4)	//read at least one float at a time
+			continue	//wait for data --unclear to me exactly how usb serial buffering will handle the possible overload from teensy
+		endif
+		VDTReadBinary2/B/O=(k_vdtReadInternalTimeOutSecs)/Q/TYPE=(2) respFloat	
+		
+		if (dataCount == 0)
+			if (numtype(num) > 0)
+				num = respFloat
+			endif
+			make/o/n=(num)/free out
+		endif	
+		out[dataCount]=respFloat
+		dataCount++
+		
+	while (dataCount < num)
+	
+	return out
+end	
+
+
 static constant k_aec_ignorePnts = 0  //how many points to set to zero at the beginning of the filter wave -- 1 is recommended. zero doesnt change much, but it's unclear how to use that instantaneous point for active electrode compenation
 static constant k_aec_tailStartPnt = 31//15//7
 static constant k_teensy_aecOptimzer_maxIters = 1000
@@ -1847,7 +1867,11 @@ function teensy_aecCalc(panelN,fitEndX,storeErrors,storeFitData)
 	String panelN
 	Variable fitEndX,storeErrors		//if store errors, the error on each optimization iteration is stored in a global wave called teensy_aecOptimzer_errors
 	Variable storeFitData	//if storeFitData, the fit waves from each operation are saved into teensy_aecOptimzer_K_all,teensy_aecOptimzer_Y_iters
-	
+
+	if (strlen(panelN) < 1)
+		panelN = winname(0,64)	//top panel
+	endif
+		
 	String folderPath = "root:Packages:"+panelN
 	WAVE aec_fullKernel = $(folderPath+":aec_fullKernel")		//must be precalculated and stored here (i.e., by teensy_gui_aec)
 	
@@ -1920,8 +1944,12 @@ function teensy_aecCalc(panelN,fitEndX,storeErrors,storeFitData)
 	endif
 	
 	//run optimization
-	optimize/L=(lowBracket)/H=(highBracket)/t=(tol)/I=(k_teensy_aecOptimzer_maxIters) teensy_aecOptimzer, pwave
-	print "optimzation complete, V_minloc",V_minloc,"init guess",initGuess
+	optimize/L=(lowBracket)/H=(highBracket)/t=(tol)/I=(k_teensy_aecOptimzer_maxIters)/Q teensy_aecOptimzer, pwave
+	if (numtype(V_minloc) > 0)
+		print "optimzation failed!!!, V_minloc",V_minloc,"init guess",initGuess
+	else
+		print "optimzation complete, V_minloc",V_minloc,"init guess",initGuess
+	endif
 	
 	//delete data from iterations not used, if needed
 	if (storeErrors)
@@ -1997,10 +2025,11 @@ end
 static constant k_sendElectrodeKernelOffsetPnts = 4	//offset expected from start pnts (nan values) to beginning of electrode kernel sent to teensy. must match sketch
 																	   //should be 4 pnts: 2 nan followed by type num followed by kernel le
 static constant k_electrodeKernel_typeNum = 2		//type num for special data transfer case, must match sketch
-function teensy_gui_sendElectrodeKernel(panelN,[forceConstantKernelVal,forceKernelPnts])
+function teensy_gui_sendElectrodeKernel(panelN,[forceConstantKernelVal,forceKernelPnts,noNegativeKernelVals])
 	String panelN
 	Double forceConstantKernelVal		//optionally pass a value for all kernel pnts (e.g., 0 for debugging)
 	int forceKernelPnts
+	int noNegativeKernelVals
 	
 	if (strlen(panelN) < 1)
 		panelN = winname(0,64)	//top panel
@@ -2014,9 +2043,8 @@ function teensy_gui_sendElectrodeKernel(panelN,[forceConstantKernelVal,forceKern
 	endif
 		
 	//for sending the kernel, first two points are nan and next point is the length of the kernel
-	int electrodeKernelStartP = 1		//relative to kernel indices, 1 ignores instantaneous point
 	int electrodeKernelEndP = k_aec_tailStartPnt - 1
-	int electrodeKernelLenP = electrodeKernelEndP - electrodeKernelStartP + 1 		//default
+	int electrodeKernelLenP = electrodeKernelEndP + 1 		//default
 	if (!paramIsdefault(forceKernelPnts) && (numtype(forceKernelPnts) == 0) )
 		electrodeKernelLenP = forceKernelPnts
 	endif
@@ -2027,13 +2055,21 @@ function teensy_gui_sendElectrodeKernel(panelN,[forceConstantKernelVal,forceKern
 	aec_lastKernelSendWv[3] = electrodeKernelLenP
 		
 	if (PAramIsDefault(forceConstantKernelVal) || (numtype(forceConstantKernelVal) > 0) ) //usual case
-		aec_lastKernelSendWv[k_sendElectrodeKernelOffsetPnts,] = teensy_aecOptimzer_elK[electrodeKernelStartP+p-k_sendElectrodeKernelOffsetPnts]		//skip the zeroth (instantaneous) point
+		aec_lastKernelSendWv[k_sendElectrodeKernelOffsetPnts,] = teensy_aecOptimzer_elK[p-k_sendElectrodeKernelOffsetPnts]		//skip the zeroth (instantaneous) point
 	else
 		aec_lastKernelSendWv[k_sendElectrodeKernelOffsetPnts,] = forceConstantKernelVal
 	endif
+	if (!ParamIsDefault(noNegativeKernelVals) && noNegativeKernelVals)
+		aec_lastKernelSendWv[k_sendElectrodeKernelOffsetPnts,]=aec_lastKernelSendWv[p]<0 ? 0 : aec_lastKernelSendWv[p]
+	endif
+	
 	print "aec_lastKernelSendWv len",sentWvLenP,"wv=",aec_lastKernelSendWv
 	//note that the wave does not need to be of length that is multiple of 16, any extras are sent as NaN from teensy_gui_sendFloats 
 	teensy_gui_sendFloats(panelN,"aec_lastKernelSendWv",0,0)
+	
+	teensy_gui_sendSettings(panelN,1)		//I dont know why, but sending a settings update helps if the user is going to run this twice in a row
+														//running it twice in a row is likely (e.g., if tweaking a setting like min and max current
+
 end
 
 function teensy_gui_getElectrodeKernelIntegral(panelN,cmd_pA)

@@ -6,61 +6,78 @@
 const unsigned int electrodeKernelLenPos = 3;    //from 0, what position to start reading electrode kernel from cp.lastDataTransfer[]
 const unsigned int maxElectrodeKernelLen = 50;   //max number of float pnts in kernel. to avoid dynamic allocation and potential memory overrun
                                                  //actual kernel lengths should be lower and values beyond the passed length are ignored
+const unsigned int maxInterpolatedKernelLen = 500;  //interpolate to 1 microsecond, max 490 total (first 10 microseconds ignored)
+
 //state variables for electrode kernel
 struct activeElectrodeCompensation {
 
   const unsigned int targetStepMicros = 10;  //target time step for noise injection for kernel measurement (AEC)
+  const float invTargetStepMicros = 1/(float)targetStepMicros;
   bool electrodeKernelReceived = false;  //computer needs to send computed kernel
   unsigned int electrodeKernelPnts = 0; //number of points in kernel. instantaneous point is ignored
-  float electrodeKernel[50] = {0.0}; //will be changed to electrodeKernelPnts 
+  float electrodeKernel[maxElectrodeKernelLen] = {0.0}; //holds the actual electrode kernel
+  float interpElectrodeKernel[maxInterpolatedKernelLen] = {0.0};  //holds the electrode kernel interpolated to 1 microsecond resolution
   float lastConvolutionResult = 0;
+  unsigned int kernelMicros = 0;
 } aec;
 
 
 //updateElectrodeKernel() is called after readFloats() is called,
 
 void updateElectrodeKernel() {
+  //read the kernel from serial
   aec.electrodeKernelPnts = cp.lastDataTransfer[electrodeKernelLenPos];
   readFloatSets(aec.electrodeKernel,aec.electrodeKernelPnts,electrodeKernelLenPos+1);
   aec.electrodeKernelReceived = true;
+  aec.kernelMicros = aec.electrodeKernelPnts * aec.targetStepMicros;  
+
+  //interpolate the kernel to 1 microsecond resolution
+  for (size_t i = 0; i < aec.kernelMicros; i++) {
+    aec.interpElectrodeKernel[i] = interp(aec.electrodeKernel,aec.invTargetStepMicros,i);
+  }
 }
 
 //computes the convolution result between the injected command current and the electrode kernel
 //this is an estimate of the artifactual voltage reading caused by injecting current through the electrode
+int histPos; unsigned int totalDt;
 FASTRUN float getAecSub() {
+  aec.lastConvolutionResult = 0.0;
+  
   if (!aec.electrodeKernelReceived) { //only return non-zero if electrode kernel has been received
-    return 0.0;
+    return aec.lastConvolutionResult;
   }
   
   if (!sp.historyWrapped) {  //only return non-zero if the history buffer has filled once (it definitely will have by the time an electrode kernel is computed)
-    return 0.0;
+    return aec.lastConvolutionResult;
   }
 
-  unsigned int i;
-  aec.lastConvolutionResult = 0;
-  for (i=0; i < aec.electrodeKernelPnts; i++) {
-    aec.lastConvolutionResult += getCurrentHistoryPosForPnt(i);
-  }
+  histPos = sp.historyPos; //position in history buffer
+  totalDt = sp.dts[histPos]; //total time since position
+  do {
+    if (totalDt >= aec.kernelMicros) { break; } //check if dt is beyond kernel length
+    histPos--; if (histPos < 0) { histPos = memLengthPnts - 1; } //wrap if needed
+    
+    if (totalDt >= aec.targetStepMicros) {   //don't start calculation til a fill kernel time step
+      aec.lastConvolutionResult += sp.currentCmds[histPos] * aec.interpElectrodeKernel[totalDt];
+    }
+    
+    totalDt += sp.dts[histPos];
+  } while (true);
   
-  return 0.0; //aec.lastConvolutionResult;
+  return aec.lastConvolutionResult; //aec.lastConvolutionResult;
 }
 
-//returns one specified pnt for the convolution of the command history with the electrode kernel
-//0 being the 1st point in the kernel (ie, skipping the instantaneous point) and the most recent current command
-//this must only be called after 1) the history has been filled enough AND 2) the electrode kernel is received from the computer
-
-//to do: consider potential for jitter in time steps and compensate by linearly interpolating the electrode kernel
-//trouble is that we need cumulative time from the command to present, and that could be slow to recalculate each time step
-//might be easier to re-compute the entire convolution each time step, where the individual step times could be summed
-FASTRUN unsigned int getCurrentHistoryPosForPnt(int pnt) {  
-  unsigned int histPos = sp.historyPos - 1 - pnt;
-  //accomodate wrapping
-  if (histPos < 0) {
-    histPos = memLengthPnts - histPos;  //-1 gives memLengthPnts - 1, and so on
-  }
-
-  return sp.currentCmds[histPos] * aec.electrodeKernel[pnt];  
+//linear interpolation for a value in an array inArray of length pnts at an offset x
+//where points are evenly spaced by 1/indDx starting from x = 0
+//invDx is precalculated to reduce the number of divisions, though speed isn't critial where this is called
+FASTRUN float interp(float inArray[], float invDx, float x) {
+  float pos = x * invDx;  
+  int p0 = floor(pos);
+  int p1 = p0 + 1;
+  float offset_p0 = pos - ((float)p0);
+  return inArray[p0]*(1-offset_p0) + inArray[p1]*offset_p0;
 }
+
 
 FASTRUN float getAecStatus() {
   if (aec.electrodeKernelReceived) {

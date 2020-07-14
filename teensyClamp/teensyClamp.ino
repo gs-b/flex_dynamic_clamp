@@ -1,4 +1,3 @@
-char junk;
 //TEENSY (3.6) DYNAMIC CLAMP FOR IGOR. Requires a Teensy 3.6 (may work for future Teensy versions that have two ADCs) To use:
 //1. Check your pin wiring and change PIN ASSIGNMENTS below. A pin for each of the two ADCs and a DAC pin is needed
 //2. Calibrate with testExternalCond3.ino and, in Igor, teensyCal_doCals() in teensyCalibration.ipf. Beforehand, update ks_teensyCom = "COM21" in that file
@@ -22,7 +21,7 @@ const float output_offset_default = 1327.7; //from output-side calibration: (tee
 
 //other constants
 const unsigned int numVmVals = 4096;    //this is the number of possible voltage readings given 12-bit analog input
-const unsigned int memLengthPnts = 1000;    //how many previous vm readings should be held in memory (for active electrode compensation
+const int memLengthPnts = 1000;    //how many previous vm readings should be held in memory (for active electrode compensation
 const unsigned int comBaud = 115200;    //baud rate for Serial USB. should match Igor
 const unsigned int floatsPerStandardDataTransfer = 16;   //how many float items are expected each read. should match Igor
 const int bytesExpectedPerStandardDataTranfer = 4*floatsPerStandardDataTransfer;    //should be 4*floatsPerStandardDataTransfer, each 32-bit float is 4 bytes!
@@ -72,17 +71,16 @@ struct stateParameters {
   //timing & timing info
   unsigned int startMillis;         //start of setup()
   unsigned int lastReadMillis;      //record time of last reading, relative to startMillis. Handled in getTargetCurrent()
-  unsigned int calibrationDataReceivedCount;   //monitors how many times calibration data has been received over serial i/o
+  unsigned int calibrationDataReceived;   //monitors how many times calibration data has been received over serial i/o
   bool wasPaused;                   //was clamp recently paused? controls whether a time step is recorded for mean,sdev,variance of dt. Don't want to record when reading an iv relation
 
-  //memory  -- to do, check if dt and edt are both needed???
+  //memory
   elapsedMicros dt;                       // will track time between each vm reading  
   float currentCmds[memLengthPnts];    //tracks previous vm readings. Handled in getTargetCurrent()
   unsigned int dts[memLengthPnts];     //tracks dt since last reading. Handled in getTargetCurrent()
-  unsigned int historyPos = 0;             //tracks current position in these arrays so they act like circular buffers. Handled in getTargetCurrent()
+  int historyPos;             //tracks current position in these arrays so they act like circular buffers. Handled in getTargetCurrent()
   float lastVm;
-  elapsedMicros edt = 0;
-  bool historyWrapped = 0;    //tracks whether the currentCmds and dts history buffer has wrapped at least once, meaning it has filled
+  bool historyWrapped;    //tracks whether the currentCmds and dts history buffer has wrapped at least once, meaning it has filled
 } sp;
 
 //OTHER VARIABLES
@@ -161,7 +159,7 @@ FASTRUN void serialSpecialCaseUpdate() {
   if (type == 0) { updateCalibration(); report(1); return; } //in this file
   if (type == 1) { injectNoise(); report(1); return; } //in injectNoise
   if (type == 2) { updateElectrodeKernel(); return; } //in activeElectrodeComp; updateElectrodeKernel does its own responding
-  if (type == 3) { stream(); return; }
+  if (type == 3) { recordStep(); return; }
 }
 
 
@@ -179,7 +177,6 @@ FASTRUN void clampStep() {
   sp.current_cmd12bit = get12bitCmdForCurrent(sp.lastTotalCurrent);
   analogWrite(dac_pin0,sp.current_cmd12bit);
   updateCurrentHistory();//store current command and, if running AEC, update pipette response
-  sp.edt = 0; //reset timer
 }
 
 FASTRUN void calcTargetCurrent() {  //sets sp.lastTotalCurrent for new target current based on vm and conductances. Reads vm, calculates current from cond relation
@@ -229,34 +226,30 @@ FASTRUN float getConductanceMultiplier() {    //0-1 proportional to size of cond
 }
 
 FASTRUN void updateCurrentHistory() {
-  sp.lastReadMillis = millis() - sp.startMillis;    //record time of this reading relative to program start
-  sp.currentCmds[sp.historyPos] = sp.lastTotalCurrent;     //sp.lastVm is updated in calcTargetCurrent()
-  sp.dts[sp.historyPos] = sp.dt;
-  if (sp.wasPaused) {  //when receiving i(v) data or not clamping, dt could get long and don't want to include in calculation
-    sp.wasPaused = 0;
-  } else {
-    rs_push(sp.dt);   //push to track dt mean and variance (in stats.ino). rs_init() must have been run already (it is in initStateParams)
-  }
-  sp.dt = 0;  
-
-  //iterate historyPos
-  sp.historyPos++;
+  sp.historyPos++;    //iterate
   if (sp.historyPos >= memLengthPnts) {   //this seems potentially faster than modulo..
     sp.historyPos = 0;
     if (!sp.historyWrapped) {
       sp.historyWrapped = true;
     }
-  }
+  }  
+  
+  sp.lastReadMillis = millis() - sp.startMillis;    //record time of this reading relative to program start
+  sp.currentCmds[sp.historyPos] = sp.lastTotalCurrent;     //sp.lastVm is updated in calcTargetCurrent()
+  sp.dts[sp.historyPos] = sp.dt;
+  if (sp.wasPaused) { sp.wasPaused = 0; } //when receiving i(v) data or not clamping, dt could get long and don't want to include in calculation
+  else { rs_push(sp.dt); }   //push to track dt mean and variance (in stats.ino). rs_init() must have been run already (it is in initStateParams)
+  sp.dt = 0;  
 }
 
 void initStateParams() {    //state params initialization + first vm measurement, first current output, on system start
   //STATE PARAMETERS
   //timing- and memory-related
   sp.startMillis = millis();
-  sp.calibrationDataReceivedCount = 0;   //monitors how many times calibration data has been received over serial i/o
+  sp.calibrationDataReceived = 0;   //monitors how many times calibration data has been received over serial i/o
   memset(sp.currentCmds,0,sizeof(sp.currentCmds));  //initialize currentCmds to zero
   memset(sp.dts,0,sizeof(sp.dts));
-  sp.historyPos = 0;             //tracks current position in these arrays so they act like circular buffers
+  sp.historyPos = -1;             //tracks current position in these arrays so they act like circular buffers
   sp.historyWrapped = 0;        //tracks whether history buffer has wrapped around at least once, meaning AEC has (more than) enough data to work with
   rs_init();                    //get ready to track dt mean and variance (in stats.ino)
   
@@ -287,7 +280,7 @@ FASTRUN void updateCalibration() {
   cp.output_slope = cp.lastDataTransfer[5];
   cp.output_offset = cp.lastDataTransfer[6];
 
-  sp.calibrationDataReceivedCount += 1;
+  sp.calibrationDataReceived = 1;
 }
 
 void initControlParams() {   //control parameters setup (these will be reset by serial i/o eventually; except possible for ivVals
@@ -303,12 +296,4 @@ void initControlParams() {   //control parameters setup (these will be reset by 
   cp.leak_mV = 0;    
   cp.junctionPotential = 0;    
   memset(cp.ivVals,0,sizeof(cp.ivVals)); 
-}
-
-//stream is just like clamp() but it reports after each clamp step
-//until interruption by serial i/o (which is also like clamp())
-FASTRUN void stream() {
-  do {
-    clampStep(); report(1);
-  } while (Serial.available() < bytesExpectedPerStandardDataTranfer);
 }

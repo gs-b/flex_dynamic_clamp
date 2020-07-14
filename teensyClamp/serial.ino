@@ -41,6 +41,16 @@ FASTRUN void readFloatSets(float intoArray[], unsigned int intoArraySize, unsign
   } while (moreToRead);    
 }
 
+//sends a set of floats all at once (no feedback from receiving computer)
+FASTRUN void sendFloats(float sendArray[], unsigned int sendArraySize, bool clampDuring) {
+
+  if (clampDuring) {
+    for (size_t i = 0; i < sendArraySize; i++) { sendFloat(sendArray[i]); clampStep(); }
+  } else {
+    for (size_t i = 0; i < sendArraySize; i++) { sendFloat(sendArray[i]); }
+  }
+}
+
 //Read float values into cp.lastDataTransfer
 //reportType options match report:
 //0  -- no reply (usually the calling function will be replying at a later time)
@@ -79,7 +89,7 @@ FASTRUN void report(int reportType) {   //1 for standard report, which indicates
   }
 
   //1 or -1 both send a status float (1 or -1) followed by all parameters
-  sendFloat(reportType);
+  sendFloat(aec.electrodeKernelReceived && sp.historyWrapped);//sendFloat(reportType);
   //send status data, positions 1-12
   sendFloat(sp.lastReadMillis); //1st value
   sendFloat(sp.lastVm); //2
@@ -89,12 +99,12 @@ FASTRUN void report(int reportType) {   //1 for standard report, which indicates
   sendFloat(sp.lastLeakCurrent); //6
   sendFloat(sp.lastArbitraryCurrent_scaled); //7
   sendFloat(sp.lastTotalCurrent); //8
-  sendFloat(sp.current_cmd12bit); //9
+  sendFloat(aec.lastConvolutionResult); //9
   sendFloat(rs_mean()); //10
   sendFloat(rs_variance()); //11
   sendFloat(rs_minVal()); //12
   sendFloat(rs_maxVal()); //13
-  sendFloat(sp.calibrationDataReceivedCount); //14
+  sendFloat(sp.calibrationDataReceived); //14//sendFloat(sp.calibrationDataReceivedCount); //14
   int historyPos;
   if (sp.historyPos < 1) {
     historyPos = memLengthPnts - 1;
