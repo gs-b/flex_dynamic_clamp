@@ -5,7 +5,6 @@
 struct ranctx { uint32_t a; uint32_t b; uint32_t c; uint32_t d; } rng;    //implements typedef struct ranctx { uint32_t a; uint32_t b; uint32_t c; uint32_t d; } ranctx;   //a structure to hold rng parameters
 
 //variables for noise function -- currently injects noise, sends triplet info over usb serial:  dt0,vm0,inj0,dt1,vm1,inj1,...
-unsigned int noise_timeStepMicros = aec.targetStepMicros-1;    //seems to give timeStepMicros + 1 due to delays
 elapsedMicros inject_dt = 0;
 const unsigned int numSteps = 20000;  //should match <targetTime>*1/timeStepMicros/10^-6. 1s at 50 microseconds, 0.2s at 10 microS
 const unsigned int headerLenForNoise = 4;   //number of floats sent as noise header
@@ -32,6 +31,9 @@ FASTRUN void injectNoise() {
   minCurrent_12bit = get12bitCmdForCurrent(cp.lastDataTransfer[4]);
   maxCurrent_12bit = get12bitCmdForCurrent(cp.lastDataTransfer[5]);
   finalCurrent_12bit = get12bitCmdForCurrent(cp.lastDataTransfer[6]);
+  aec.targetStepMicros = (int)cp.lastDataTransfer[7];
+  unsigned int noise_timeStepMicros = aec.targetStepMicros-1;    //seems to give timeStepMicros + 1 due to delays
+  
   if (maxCurrent_12bit > minCurrent_12bit) {
     rangeCurrent_12bit = maxCurrent_12bit - minCurrent_12bit;
   } else {

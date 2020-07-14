@@ -1104,8 +1104,9 @@ function teensy_gui_sendCalibration(panelN,bypassNonLiveMode)
 end
 
 static constant k_recordStep_typeNum = 3		//must match expected spcial case type number in sketch
-function teensy_gui_recordStep(panelN,stepMicros,baselineCurrent,stepCurrent)
+function teensy_gui_recordSteps(panelN,numSteps,stepMicros,baselineCurrent,stepCurrent)
 	String panelN
+	int numSteps			//number of steps to average (or 1 for single trial, which is fine)
 	int stepMicros		//microseconds at which step starts. available precision is that of clamp steps (3-5 microseconds)
 	Variable baselineCurrent		//pre-step current
 	Variable stepCurrent	//current during step
@@ -1122,27 +1123,67 @@ function teensy_gui_recordStep(panelN,stepMicros,baselineCurrent,stepCurrent)
 	sendWv[4] = baselineCurrent
 	sendWv[5] = stepCurrent
 	sendWv[6,]=nan
-	print "sendWv",sendWv
+
+	int i,sent,totalData,numSamples,endMicros,ready
+	Variable timeoutTicks = inf
 	
-	int sent = teensy_gui_sendSettings(panelN,1,customSettingsWv=sendWv,noReceiveBg=1)
-	if (!sent)
-		print "teensy_gui_recordStep() did not proceed, likely because teensy is busy"
-		return 0
+	for (i=0;i<numSteps;i++)
+		do
+			if ( ticks > timeoutTicks )
+				print "teensy_gui_recordSteps() teensy remained busy, unable to record multiple step responses!"
+				return 0
+			endif	
+		while (!teensy_gui_isReadyToSend(panelN,0))		//is the gui/teensy busy?
+	
+		sent = teensy_gui_sendSettings(panelN,1,customSettingsWv=sendWv,noReceiveBg=1)
+		if (!sent)
+			print "teensy_gui_recordStep() did not proceed, likely because teensy is busy"
+			return 0
+		endif
+		
+		WAVE responses = teensy_readDuringExecution(comStr,nan)
+		
+		teensy_gui_sendSettings(panelN,0)		//I dont know why, but sending a settings update helps if the user is going to run this twice in a row												
+		totalData = responses[0]	
+		numSamples = floor((totalData - 1)/2)
+		duplicate/o/r=[1,1+numSamples-1] responses,$(folderPath+":lastStepDts")/wave=lastStepDts
+		duplicate/o/r=[1+numSamples,1+2*numSamples-1] responses,$(folderPath+":lastStepVoltageResp")/wave=lastStepVoltageResp
+		
+		//unwrap timing
+		lastStepDts[0] = 0
+		lastStepDts[1,] = lastStepDts[p-1] + lastStepDts[p]
+		
+		//interpolate to 1 microsecond (more useful for averaging than for not)
+		if (numSteps > 1)
+			if (i==0)
+				endMicros = lastStepDts[dimsize(lastStepDts,0)-1]-20		//some might end slightly later or earlier, but we can loose a bit of the end
+				make/o/d/free/n=(endMicros) interpTemp;
+				setscale/p x,0,1e-6,"s",interpTemp
+			endif
+
+			interpTemp=interp(p,lastStepDts,lastStepVoltageResp)
+			
+			if (i==0)
+				duplicate/o/free interpTemp,allInterps
+			else
+				concatenate/np=1 {interpTemp},allInterps
+			endif
+			
+			timeoutTicks = ticks + k_backgroundWaitTimeLimit_ticks;		//to see how long we've been waiting during next iteration 
+		endif	
+		
+	endfor		
+		
+	if (numSteps > 1)
+		matrixtranspose allInterps		//orient to get stats across replicates
+		wavestats/pcst allInterps
+		WAVE M_wavestats; 
+		matrixtranspose M_wavestats
+		duplicate/o M_Wavestats,$(folderPath+":lastStepVoltageRespAvg")/wave=lastStepVoltageRespAvg
+		setscale/p x,0,1e-6,"s",lastStepVoltageRespAvg
+		killwaves/z M_wavestats
 	endif
 	
-	WAVE responses = teensy_readDuringExecution(comStr,nan)
-	int totalData = responses[0]	
-	int numSteps = floor((totalData - 1)/2)
-	duplicate/o/r=[1,1+numSteps-1] responses,$(folderPath+":lastStepDts")/wave=lastStepDts
-	duplicate/o/r=[1+numSteps,1+2*numSteps-1] responses,$(folderPath+":lastStepVoltageResp")/wave=lastStepVoltageResp
-	
-	//unwrap timing
-	lastStepDts[0] = 0
-	lastStepDts[1,] = lastStepDts[p-1] + lastStepDts[p]
-	
-	teensy_gui_sendSettings(panelN,1)		//I dont know why, but sending a settings update helps if the user is going to run this twice in a row
-														//running it twice in a row is likely (e.g., if tweaking a setting like min and max current
-
 end 
 
 #if (exists("fdaqmx_writechan"))		//only compile of daq procs are available via the xop	
@@ -1728,14 +1769,15 @@ static constant k_reportFrequency_steps = 15		//how often to print what's going 
 //these should agree with their counterparts in injectNoise.ino
 static constant k_numSteps = 10000
 static constant k_serialLimitBytes = 64;
-static constant k_aecFilterTargetStepMicros = 10	//should match corresponding ino sketch targetStepMicros
+static constant k_aec_tailStartPnt = 32//31//15//7
 static constant k_aec_fitEndX = inf //0.25// inf //0.25		//seconds to fit; to fit entire kernel, use inf
 static constant k_noiseRun_typeNum = 1		//must match special case type for running noise in sketch
-function/S teensy_gui_aec(panelN,nAvg,noiseMin_pA,noiseMax_pA,postCmd_pA)
+function/S teensy_gui_aec(panelN,nAvg,noiseMin_pA,noiseMax_pA,postCmd_pA,stepMicros)
 	String panelN
 	Variable noiseMin_pA,noiseMax_pA		//min and max of noise in pA. randomly distributed
 	Variable postCmd_pA	//holding for between trials to average and after all are complete
 	Variable nAvg			//how many averages for the kernel
+	int stepMicros		//5 or 10 microseconds work well. Really can't go below 5 unless someone finds a way to speed clamp cycles
 		
 	if (strlen(panelN) < 1)
 		panelN = winname(0,64)	//top panel
@@ -1746,13 +1788,19 @@ function/S teensy_gui_aec(panelN,nAvg,noiseMin_pA,noiseMax_pA,postCmd_pA)
 		
 	make/free/o/n=(k_floatsPerStandardDataTransfer)/free settingsWv;	
 	//for serial handling in teensy, points 0 and 1 nan, two specifies this is a noise transfer
-	settingsWv[0,1] = nan; settingsWv[2] = k_noiseRun_typeNum
+	settingsWv[0,1] = nan
+	settingsWv[2] = k_noiseRun_typeNum
 	//settingsWv[3] = seed;  //seed now set in loop so we can average white noise generated with different seeds
 	settingsWv[4] = noiseMin_pA;  //set min
 	settingsWv[5] = noiseMax_pA;   //set max
 	settingsWv[6] = postCmd_pA;		//set cmd in between and after (if clamping, will quickly be overwritten after all rounds completed)
+	settingsWv[7] = stepMicros;	//target step microseconds
+	
+	string stepMicrosStr; sprintf stepMicrosStr,"%d",stepMicros
+	setwindow $panelN userdata(aec_stepMicros)=stepMicrosStr
+	
 	string infoStr = "";
-	make/o/free/n=(1)/d  currentTemp,voltageTemp,ccTemp_td		//assigned after first iteration, need to be declared for compilation
+	make/o/free/n=(1)/d  currentTemp,voltageTemp,ccTemp_td	,stimAutocorrTemp_fd	//assigned after first iteration, need to be declared for compilation
 	make/o/c/free/n=(1) ccTemp_fd //assigned after first iteration, need to be declared for compilation
 
 	Variable respFloat
@@ -1763,22 +1811,22 @@ function/S teensy_gui_aec(panelN,nAvg,noiseMin_pA,noiseMax_pA,postCmd_pA)
 		
 		if (i < nAvg)		//if we have collected all data, don't send again
 			//send settings to kick it off. First and all responses will be readings. 
-			settingsWv[3] = i+6;		//set seed .. 6 is just a random pick
+			settingsWv[3] = i+12;		//set seed .. 6 is just a random pick
 			teensy_sendOneSetOfFloats(panelN,settingsWv,1,1,noReceiveBg=1)
 		endif
 		
 		if (i > 0)		//while the noise is running, can calculate cross corr here
-			[ccTemp_fd,ccTemp_td]=simpleCrossCorr(currentTemp,voltageTemp)
+			[ccTemp_fd,stimAutocorrTemp_fd]=simpleCrossCorrAndStimPower(currentTemp,voltageTemp)
 			
 			if (i==0)
 				duplicate/o/free ccTemp_fd,cc_fd
-				duplicate/o/free ccTemp_td,cc_td
+				duplicate/o/free stimAutocorrTemp_fd,stimAc_fd
 			else
 				concatenate/np=1/free {ccTemp_fd},cc_fd
-				concatenate/np=1/free {ccTemp_td},cc_td
+				concatenate/np=1/free {stimAutocorrTemp_fd},stimAc_fd
 			endif
 		
-			if (i==navg)		//time to stop
+			if (i>=navg)		//time to stop
 				break
 			endif
 		endif
@@ -1813,8 +1861,14 @@ function/S teensy_gui_aec(panelN,nAvg,noiseMin_pA,noiseMax_pA,postCmd_pA)
 	
 	//calc filters and average...
 	make/o/d/n=(1) $(folderPath+":aec_fullKernel")/wave=aec_fullKernel
-	matrixop/o aec_fullKernel = sumRows(cc_td)/numcols(cc_td)		//calculate average, for more detail use: //wave_colStats(cc_td,0,inf,0,inf,out_filter)
-	setscale/p x,0,k_aecFilterTargetStepMicros*10^-6,"s",aec_fullKernel
+	matrixop/o/c cc_fd_avg = sumRows(cc_fd)/numcols(cc_fd)
+	matrixop/o/c stimAc_fd_avg = sumRows(stimAc_fd)/numcols(stimAc_fd)	//imag should all be zero actually so could ignore it
+	matrixop/o/c linearEst_fd = cc_fd_avg / stimAc_fd_avg
+	ifft/dest=aec_fullKernel linearEst_fd 
+	reverse/p aec_fullKernel		//make filter forward-going, as expected downstream
+	
+	//matrixop/o aec_fullKernel = sumRows(cc_td)/numcols(cc_td)		//calculate average, for more detail use: //wave_colStats(cc_td,0,inf,0,inf,out_filter)
+	setscale/p x,0,stepMicros*10^-6,"s",aec_fullKernel
 	//Double baselineVal = min(aec_fullKernel[0],aec_fullKernel[1])		//deals with offsets from practical experience so far
 	//aec_fullKernel -= baselineVal		//baseline subtract
 	
@@ -1861,7 +1915,6 @@ end
 
 
 static constant k_aec_ignorePnts = 0  //how many points to set to zero at the beginning of the filter wave -- 1 is recommended. zero doesnt change much, but it's unclear how to use that instantaneous point for active electrode compenation
-static constant k_aec_tailStartPnt = 31//15//7
 static constant k_teensy_aecOptimzer_maxIters = 1000
 function teensy_aecCalc(panelN,fitEndX,storeErrors,storeFitData)
 	String panelN
@@ -1886,16 +1939,18 @@ function teensy_aecCalc(panelN,fitEndX,storeErrors,storeFitData)
 	print "fitEndP",fitEndP,"fitPnts",fitPnts
 	
 	//fit exponential y = K0+K1*exp(-(x-x0)/K2). we will force K0 = 0 and x0 will be equal to zero
-	make/o/d/free/n=(3) coefs; coefs[0] = 0		//set y0 to initialize at zero
+	make/o/d/free/n=(3) coefs
+	coefs[0] = 0		//set y0 to initialize at zero
+	//curvefit/q/w=2 exp_xoffset, aec_fullKernel[k_aec_tailStartPnt,fitEndP]		//hold y0 contant with /h="100"
 	curvefit/q/w=2/h="100" exp_xoffset,kwCWave=coefs aec_fullKernel[k_aec_tailStartPnt,fitEndP]		//hold y0 contant with /h="100"
-		
-	Double memAmp = coefs[1] 
-	Double memTau = coefs[2]
+	//WAVE w_coef	
+	Double memAmp = coefs[1] //W_coef[1]//coefs[1] 
+	Double memTau = coefs[2] //W_coef[2] //coefs[2]
 	
 	//calculate the tail fit  -- make this a global wave, so it is accessible to the optimize function
 	make/o/d/n=(fitPnts) $(folderPath+":aec_fullKernel_asMemTauFit")/wave=teensy_aecOptimzer_K; 
 	setscale/p x,dimoffset(aec_fullKernel,0),dimdelta(aec_fullKernel,0),waveunits(aec_fullKernel,0),teensy_aecOptimzer_K
-	teensy_aecOptimzer_K=memAmp*exp(-x/memTau)		//use at first to sum the first few poins of the fit to compute elR below, then used for optimization
+	teensy_aecOptimzer_K=	memAmp*exp(-x/memTau)		//W_coef[0]+memAmp*exp(-x/memTau)		//use at first to sum the first few poins of the fit to compute elR below, then used for optimization
 	
 	//estimate membrane and electrode resistances -- their ratio is the parameter to optimize with (initGuess)
 	Double memR = memAmp*memTau //memR is integral of membrane impulse response // - tailFit[0] - tailFit[1] // - memAmp*exp(-pnt2x(aec_fullKernel,0)/memTau) - memAmp*exp(-pnt2x(aec_fullKernel,1)/memTau)		//dont understand why these are necessary to estimate rm
@@ -2009,34 +2064,38 @@ Function teensy_aecOptimzer(w,x0)
 	return errWv[0]		//return function result, the error to be minimized
 End
 
-function [WAVE/c out_fd, WAVE out_td] simpleCrossCorr(WAVE wv0,WAVE wv1)		//returns result in complex (fd) and time domains (td)
-	//WAVE wv0,wv1
+function [WAVE/c out, wave/c temp0_fd_autocorr] simpleCrossCorrAndStimPower(WAVE wv0,WAVE wv1)		//returns result in complex (fd) and time domains (td)
+	//calculates the cross correlation of wv0 and wv1 assuming wv1 is linearly related to wv0 (i.e., wv0 was the stimulus)
+	//intended for use where an ensemble of stim-response pairs is to be computed this way and averaged
+	//and the average is to be normalized by the stimulus power. See Kim and Rieke 2001
 	
 	fft/dest=temp0_fd/free wv0
 	fft/dest=temp1_fd/free wv1
-	duplicate/o/c/free temp0_fd,ccTemp_fd
-	ccTemp_fd = temp1_fd/temp0_fd
-	ifft/dest=ccTemp_td/free ccTemp_fd	
-	
-	return [ccTemp_fd, ccTemp_td]
+	duplicate/o/c temp0_fd,temp0_fd_autocorr
+	temp0_fd_autocorr = temp0_fd * conj(temp0_fd)
+	duplicate/o/c/free temp0_fd,out
+	out *= conj(temp1_fd)
+	return [out, temp0_fd_autocorr]
 end
 
 //need to make this a wrapper for a standard sending function
-static constant k_sendElectrodeKernelOffsetPnts = 4	//offset expected from start pnts (nan values) to beginning of electrode kernel sent to teensy. must match sketch
+static constant k_sendElectrodeKernelOffsetPnts = 5//offset expected from start pnts (nan values) to beginning of electrode kernel sent to teensy. must match sketch
 																	   //should be 4 pnts: 2 nan followed by type num followed by kernel le
 static constant k_electrodeKernel_typeNum = 2		//type num for special data transfer case, must match sketch
-function teensy_gui_sendElectrodeKernel(panelN,[forceConstantKernelVal,forceKernelPnts,noNegativeKernelVals])
+function teensy_gui_sendElectrodeKernel(panelN,ignoreMicros,[forceConstantKernelVal,forceKernelPnts,noNegativeKernelVals])
 	String panelN
 	Double forceConstantKernelVal		//optionally pass a value for all kernel pnts (e.g., 0 for debugging)
 	int forceKernelPnts
 	int noNegativeKernelVals
+	int ignoreMicros		//whether to ignore start of filter. 0 micros to use all
 	
 	if (strlen(panelN) < 1)
 		panelN = winname(0,64)	//top panel
 	endif
 	
 	String folderPath = "root:Packages:"+panelN
-	WAVE/Z teensy_aecOptimzer_elK = $(folderPath+":aec_electrodeKernel")
+	WAVE/Z teensy_aecOptimzer_elK = $(folderPath+":aec_electrodeKernel")  //default: use the computed electrode kernel
+
 	if (!waveexists(teensy_aecOptimzer_elK))
 		print "teensy_gui_sendElectrodeKernel() teensy_aecOptimzer_elK is not calculated. Calculate AEC kernels first!"
 		return 0
@@ -2053,6 +2112,7 @@ function teensy_gui_sendElectrodeKernel(panelN,[forceConstantKernelVal,forceKern
 	aec_lastKernelSendWv[0,1] = nan		//teells teensy to expect special case transfer
 	aec_lastKernelSendWv[2]= k_electrodeKernel_typeNum
 	aec_lastKernelSendWv[3] = electrodeKernelLenP
+	aec_lastKernelSendWv[4] = ignoreMicros
 		
 	if (PAramIsDefault(forceConstantKernelVal) || (numtype(forceConstantKernelVal) > 0) ) //usual case
 		aec_lastKernelSendWv[k_sendElectrodeKernelOffsetPnts,] = teensy_aecOptimzer_elK[p-k_sendElectrodeKernelOffsetPnts]		//skip the zeroth (instantaneous) point
@@ -2178,108 +2238,3 @@ static function disp_arrayAxes(winN,axMatchStr,spaceFrac,orderedList,[rev])
 		modifygraph/w=$winN axisenab($ax)={currStart,currStart+fillPerAx}
 	endfor
 end
-
-
-
-//a version for use in a pre-emptive thread. requires thread creation on gui creation and thread killing on gui killing.
-//immediately got a bug I didnt understand so gave up on this for now
-//send float data to the teensy, then
-//begin a background function that will check for response from teensy and update GUI accordingly
-//return 0 if failed to start background function, 1 if started successfully
-//function teensy_sendOneSetOfFloats2(panelN,wv,ignoreWaitingForResponse,doNotClearWaitingStatus,[noReceiveBg])
-//	String panelN	//teensy GUI panelN
-//	WAVE wv
-//	int ignoreWaitingForResponse		//pass 1 to ignore waiting for response -- should be used with extreme caution. Intended for leaving the busy signal on during multiple sends, like the i(v) relation
-//	int doNotClearWaitingStatus		//pass 1 in order to NOT clear waiting status after finishing read from teensy -- should also be used w/ extreme caution. Also intended for leaving busy signal on during multiple sends
-//	int noReceiveBg		//pass 1 to avoid starting a background function to poll for results
-//	
-//	int doReceiveBg = paramisdefault(noReceiveBg) || !noReceiveBg
-//	
-//	if (strlen(panelN) < 1)
-//		panelN = winname(0,64)	//top panel
-//	endif
-//	
-//	int numToSend = dimsize(wv,0)
-//	if (numToSend != k_floatsPerStandardDataTransfer)
-//		teensy_gui_postMessage(panelN,"teensy_sendOneSetOfFloats2() ERROR float wave passed to send "+nameofwave(wv)+" has incorrect length, aborting",1)
-//		return 0
-//	endif
-//	
-//	int ok = teensy_gui_isReadyToSend(panelN,ignoreWaitingForResponse)
-//	if (!ok)
-//		return 0
-//	endif
-//	
-//	String comStr = getuserdata(panelN,"","comStr")	
-//	if (doReceiveBg)
-//		//clear serial i/o
-//		vdt2/p=$comStr killio
-//	endif
-//	
-//	//send data
-//	VDTWriteBinaryWave2/B/O=(3)/TYPE=(2)/Q wv
-//	if (V_VDT < 1)
-//		teensy_gui_postMessage(panelN,"Send settings: failed unexpectedly after VDTWriteBinaryWave2 in teensy_sendOneSetOfFloats2()!!!",1)
-//		return 0
-//	endif
-//	
-//	if (!doReceiveBg)		//all done if dont need to start background task
-//		return 0
-//	endif
-//	
-//	//prepare for pre-emptive thread polling
-//	teensy_gui_setResponseWaitStatus(panelN,1)		//set to busy/waiting for response -- this will be set to zero when the background task ends
-//	String folderPath = getUserdata(panelN,"","folderPath")
-//	Variable/G $(folderPath+":threadGroupID")
-//	NVAR threadGroupID = $(folderPath+":threadGroupID")
-//	WAVE lastTeensyResponse = $(folderPath+":lastTeensyResponse")		
-//	WAVE teensyStateHistory=$(folderPath+":teensyStateHistory")	
-//	
-//	Threadstart threadGroupID,0,teensy_gui_serialPollInThread(comStr,lastTeensyResponse,teensyStateHistory)
-//	
-//	return 1
-//end
-
-//check for responses and update GUI when received -- this is created the first time teensy_gui_startSerialPolling() is called then paused in between reads 
-
-//threadsafe function teensy_gui_serialPollInThread(comStr,lastTeensyResp,teensyStateHistory)
-//	String comStr
-//	WAVE lastTeensyResp			//must be 16 float points
-//	WAVE teensyStateHistory		//wave to store last teensy response
-//	
-//	int i, limitTicks = ticks + k_backgroundWaitTimeLimit_ticks,bytesToRead = 0
-//	int readSuccess
-//	
-//	for (i=0; ticks < limitTicks; i++)
-//		//poll until serial input available
-//		if (teensy_bytesAvailable(comStr) < 1)
-//			continue
-//		endif
-//	
-//		VDTReadBinaryWave2/B/O=(k_vdtReadInternalTimeOutSecs)/Q/TYPE=(2) lastTeensyResp
-//		bytesToRead = v_vdt
-//		
-//	endfor
-//	
-//	//fill current state history index and iterate
-//	int stateBufferIndex = teensy_gui_getStateHistoryIndex(teensyStateHistory)
-//	teensyStateHistory[stateBufferIndex][0,k_floatsPerStandardDataTransfer-1]=lastTeensyResp[q]
-//	teensyStateHistory[stateBufferIndex][%dt_sdev]=sqrt(teensyStateHistory[stateBufferIndex][%dt_var])
-//	teensyStateHistory[stateBufferIndex][%lastReadSecs]=teensyStateHistory[stateBufferIndex][%lastReadMillis]/1000
-//	teensy_gui_incrementStateHistoryIndex(teensyStateHistory)
-//end
-//
-//threadsafe function teensy_gui_getStateHistoryIndex(teensyStateHistory)
-//	WAVE teensyStateHistory
-//	
-//	return str2num(stringbykey("stateBufferIndex",note(teensyStateHistory)))
-//end
-//
-//threadsafe function teensy_gui_incrementStateHistoryIndex(teensyStateHistory)
-//	WAVE teensyStateHistory
-//	
-//	int stateBufferIndex=mod(teensy_gui_getStateHistoryIndex(teensyStateHistory)+1,k_teensyStateBufferSize)
-//	String stateBufferIndexStr; sprintf stateBufferIndexStr,"%d",stateBufferIndex
-//	String noteStr = replacestringbykey("stateBufferIndex",note(teensyStateHistory),stateBufferIndexStr)
-//	note/k/nocr teensyStateHistory,noteStr
-//end	
