@@ -91,11 +91,14 @@ function startGUI(comStr)
 	String includeSetVarDataInSettings = "1;1;1;"		//whether to send set var data to teensy, likely yes for all	
 	
 	//checkbox specificatipons
-	Variable cbHeight=14,cbWidth=140,cbVertSpacing
-	String checkboxes="leakClamping;arbClamping;liveUpdating;"
-	String cbTitles="Leak clamp;Arbitrary clamp;Live updates;"
-	String cbHelpStrs="Run leak clamp (simulate a leak conductance based on nS, mV to the left;Initiate arbitrary clamp;Check for changes to send immediately to teensy. SHIFT click when unchecked to send a single update for all;"
-	String includeCbInSettings = "1;1;0;"		//whether to send checkbox data to teensy, likely only arbitrary clamp
+	Variable cbHeight=14,cbWidth=140,cbVertSpacing,cbRows=3
+	String checkboxes="leakClamping;arbClamping;liveUpdating;runAec;"			//in future, might be good to append something like CB to avoid name conflicts
+	String cbTitles="Leak clamp;Arb. clamp;Auto;AEC;"
+	String cbHelpStrs="Run leak clamp (simulate a leak conductance based on nS, mV to the left;"
+	cbHelpStrs+="Initiate arbitrary (arb.) clamp;"
+	cbHelpStrs+="Send changes to GUI immediately (automatically). SHIFT click when unchecked to send a single update for all;"
+	cbHelpStrs+="Use AEC (Active Electrode Compensation). Requires a calculated and sent electrode kernel. SHIFT click to calculate. CTRL+SHIFT click to send to teensy;"
+	String includeCbInSettings = "1;1;0;1;"		//whether to send checkbox data to teensy, likely only arbitrary clamp
 	
 	//data folder (currently  stores iv relation, calibration data, and teensy status history wave) -- a design goal was to avoid global variables, but these are unavoidable
 	//currently won't be killed with window. Could add a window hook to do so, but would probably want to prompt user in case they want to keep the I(V) waves
