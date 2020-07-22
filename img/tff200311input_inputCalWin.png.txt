@@ -1,0 +1,15 @@
+picFileName~tff200311input_inputCalWin.png
+graphName~tff200311input_inputCalWin
+experimentName~teensy.pxp
+experimentFullPath~D:Dropbox (HMS):do lab -- unshared:Do Lab:Analysis:
+lastSaveDate~Wed, Jul 22, 2020
+lastSaveTime~3:57:30 PM
+picSavePath~D:Dropbox (HMS):flex_dynamic_clamp:img:
+OS_user~doLab
+saveWidthInch~4.4271
+saveHeightInch~2.1979
+graphFullWaveList~tff200311input;fit_tff200311input;
+graphTraceList~teensyReads;teensyInput;teensyReads_sdev;teensyInput_sdev;fit_tff200311input;
+wavesForTraces~tff200311inputtff200311inputtff200311inputtff200311inputfit_tff200311input
+xWavesForTraces~tff200311inputtff200311inputtff200311inputtff200311input
+winRecreation~Window tff200311input_inputCalWin() : Graph	PauseUpdate; Silent 1		// building window...	Display /W=(146.25,39.5,540.75,248)/K=1  tff200311input[*][%avg][%teensyReads]/TN=teensyReads vs tff200311input[*][%avg][%equivMemVoltage]	AppendToGraph/L=L_input tff200311input[*][%avg][%teensyInputVoltage]/TN=teensyInput vs tff200311input[*][%avg][%equivMemVoltage]	AppendToGraph/L=left_sdev/B=bottom_sdev2 tff200311input[*][%sdev][%teensyReads]/TN=teensyReads_sdev vs tff200311input[*][%sdev][%teensyInputVoltage]	AppendToGraph/L=L_input_sdev/B=bottom_sdev tff200311input[*][%sdev][%teensyInputVoltage]/TN=teensyInput_sdev vs tff200311input[*][%sdev][%equivMemVoltage]	AppendToGraph fit_tff200311input	ModifyGraph rgb(fit_tff200311input)=(1,4,52428)	ModifyGraph muloffset(teensyReads_sdev)={0,0.127817940771435}	ModifyGraph lblPos(left)=52,lblPos(bottom)=52,lblPos(L_input)=52,lblPos(left_sdev)=52	ModifyGraph lblPos(bottom_sdev2)=33,lblPos(L_input_sdev)=52,lblPos(bottom_sdev)=52	ModifyGraph prescaleExp(bottom_sdev2)=3,prescaleExp(L_input_sdev)=3,prescaleExp(bottom_sdev)=3	ModifyGraph freePos(L_input)=0	ModifyGraph freePos(left_sdev)={0,bottom_sdev2}	ModifyGraph freePos(bottom_sdev2)={0,left_sdev}	ModifyGraph freePos(L_input_sdev)={0,bottom_sdev}	ModifyGraph freePos(bottom_sdev)=0	ModifyGraph axisEnab(left)={0.55,1}	ModifyGraph axisEnab(bottom)={0,0.4}	ModifyGraph axisEnab(L_input)={0,0.45}	ModifyGraph axisEnab(left_sdev)={0.62,1}	ModifyGraph axisEnab(bottom_sdev2)={0.61,1}	ModifyGraph axisEnab(L_input_sdev)={0,0.38}	ModifyGraph axisEnab(bottom_sdev)={0.61,1}	Label left "Teensy reads"	Label bottom "Mem voltage (mV)"	Label L_input "Scaled voltage"	Label left_sdev "Read SDEV (mV)\\u#2"	Label bottom_sdev2 "Scaled input SDEV (mV)"	Label L_input_sdev "SDEV (mV)\\u#2"	Label bottom_sdev "Input Mem voltage SDEV (mV)\\u#2"	ErrorBars/T=0/L=0.6/RGB=(0,0,0) teensyReads XY,wave=(tff200311input[*][%sdev][%equivMemVoltage],tff200311input[*][%sdev][%equivMemVoltage]),wave=(tff200311input[*][%sdev][%teensyInputVoltage],tff200311input[*][%sdev][%teensyInputVoltage])	ErrorBars/T=0/L=0.6/RGB=(0,0,0) teensyInput XY,wave=(tff200311input[*][%sdev][%equivMemVoltage],tff200311input[*][%sdev][%equivMemVoltage]),wave=(tff200311input[*][%sdev][%teensyInputVoltage],tff200311input[*][%sdev][%teensyInputVoltage])EndMacro
