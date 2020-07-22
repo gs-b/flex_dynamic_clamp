@@ -1,15 +1,0 @@
-picFileName~tff200311output_outputCalWin.png
-graphName~tff200311output_outputCalWin
-experimentName~teensy.pxp
-experimentFullPath~D:Dropbox (HMS):do lab -- unshared:Do Lab:Analysis:
-lastSaveDate~Wed, Jul 22, 2020
-lastSaveTime~3:57:30 PM
-picSavePath~D:Dropbox (HMS):flex_dynamic_clamp:img:
-OS_user~doLab
-saveWidthInch~4.1875
-saveHeightInch~2.1979
-graphFullWaveList~tff200311output;fit_tff200311output;
-graphTraceList~equivCurrent;teensyOutputVoltage;equivCurrent_sdev;teensyOutputVoltage_sdev;fit_tff200311output;
-wavesForTraces~tff200311outputtff200311outputtff200311outputtff200311outputfit_tff200311output
-xWavesForTraces~tff200311outputtff200311outputtff200311outputtff200311output
-winRecreation~Window tff200311output_outputCalWin() : Graph	PauseUpdate; Silent 1		// building window...	Display /W=(441,44.75,835.5,253.25)/K=1  tff200311output[*][%avg][%equivCurrent]/TN=equivCurrent vs tff200311output[*][%cmdVal][0]	AppendToGraph/L=L_input tff200311output[*][%avg][%teensyOutputVoltage]/TN=teensyOutputVoltage vs tff200311output[*][%cmdVal][0]	AppendToGraph/L=left_sdev/B=bottom_sdev tff200311output[*][%sdev][%equivCurrent]/TN=equivCurrent_sdev vs tff200311output[*][%cmdVal][0]	AppendToGraph/L=L_input_sdev/B=bottom_sdev tff200311output[*][%sdev][%teensyOutputVoltage]/TN=teensyOutputVoltage_sdev vs tff200311output[*][%cmdVal][0]	AppendToGraph fit_tff200311output	ModifyGraph rgb(fit_tff200311output)=(1,4,52428)	ModifyGraph lblPos(left)=57,lblPos(bottom)=52,lblPos(L_input)=52,lblPos(left_sdev)=52	ModifyGraph lblPos(bottom_sdev)=52,lblPos(L_input_sdev)=52	ModifyGraph prescaleExp(L_input_sdev)=3	ModifyGraph freePos(L_input)=0	ModifyGraph freePos(left_sdev)={0,bottom_sdev}	ModifyGraph freePos(bottom_sdev)=0	ModifyGraph freePos(L_input_sdev)={0,bottom_sdev}	ModifyGraph axisEnab(left)={0.55,1}	ModifyGraph axisEnab(bottom)={0,0.4}	ModifyGraph axisEnab(L_input)={0,0.45}	ModifyGraph axisEnab(left_sdev)={0.62,1}	ModifyGraph axisEnab(bottom_sdev)={0.61,1}	ModifyGraph axisEnab(L_input_sdev)={0,0.38}	Label left "Scaled\routput (pA)"	Label bottom "Teensy Cmd (0-4095)"	Label L_input "Unscaled\rTeensy Output (V)"	Label left_sdev "SDEV (pA)\\U"	Label bottom_sdev "Teensy Cmd (0-4095)"	Label L_input_sdev "SDEV (mV)\\u#2"	ErrorBars/T=0/L=0.6/RGB=(0,0,0) equivCurrent Y,wave=(tff200311output[*][%sdev][%equivCurrent],tff200311output[*][%sdev][%equivCurrent])	ErrorBars/T=0/L=0.6/RGB=(0,0,0) teensyOutputVoltage Y,wave=(tff200311output[*][%sdev][%teensyOutputVoltage],tff200311output[*][%sdev][%teensyOutputVoltage])EndMacro
