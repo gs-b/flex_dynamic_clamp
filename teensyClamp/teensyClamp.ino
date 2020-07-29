@@ -42,8 +42,10 @@ struct controlParameters {    //name of struct type
   float output_offset; //from output-side calibration: (teensyWriteVal)=((currentVal in pA)-(offset))/(slope). initialized to output_offset_default  
 
   //standard Serial USB control data. usually positions 1 onward (0 is nan to indicate that these data are being sent)
+  bool isRunning;         //does the teensy do anything during clamp steps? Timing is also relative to running start
   bool leakClamping;      //is the teensy in dynamic clamp mode for a leak current? (leakClamping checkbox in Igor)
   bool dynamicClampingArbitraryInput;  //is the teensy in dynamic clamp mode for an arbitrary conductance waveform? (arbClamping checkbox in Igor)
+  bool aec; //is the teensy in AEC clamp mode? (controlled by AEC checkbox and requires electrode kernel has been sent to teensy)
   float dcOffset_pA; //apply any dc offset? (dc_pA slider in Igor)
   float leak_nS;       //apply any leak conductance? (leak_nS slider in Igor)
   float leak_mV;      //reversal potential of the leak conductance? (leak_mV slider in Igor). leak current is simply = (Vmem - leak_mV)*leak_nS (has units of pA like output-side calibration)
@@ -145,14 +147,17 @@ FASTRUN void loop() {
     }
   } else {                                 //case 1 (0 real, assume all real): iv update
     readFloatSets(cp.ivVals,numVmVals,0);   //read this serial input as the first set of iv values, prepare to load more 
-  }  //note that iv is not handled like special cases because its timing consuming and this minimizes the number of transfers, as the first transfer can carry 16 real float values
+  }  //note that iv is not handled like special cases because its time consuming and this minimizes the number of transfers, as the first transfer can carry 16 real float values
 }
 
 //handle various potential updates depending on value of cp.lastDataTransfer[2]
-//type == 0: calibration update (4 floats)
+//type == 0: force calibration values (4 floats)
 //type == 1: run noise (1 float)
 //type == 2: electrode kernel transfer (variable length depending on next point)
-//type == 3: streaming. no updates from GUI allowed until stop
+//type == 3: record step. no updates from GUI allowed until stop
+//type == 4: input-side calibration over serial i/o (returns a set of vm pin readings)
+//type == 5: output-side calibration over serial i/o (sets output DAC to value from 0-4095 in cp.lastDataTransfer[3]; does nothing out of range)
+//type == 6: follow mode for calibration (initiate and stop with with cp.lastDataTransfer[3] == 0 or 1, respectively) -- NOT RECENTLY TESTED
 FASTRUN void serialSpecialCaseUpdate() {
   int type = (int)cp.lastDataTransfer[2];
 
@@ -160,6 +165,9 @@ FASTRUN void serialSpecialCaseUpdate() {
   if (type == 1) { injectNoise(); report(1); return; } //in injectNoise
   if (type == 2) { updateElectrodeKernel(); return; } //in activeElectrodeComp; updateElectrodeKernel does its own responding
   if (type == 3) { recordStep(); return; }
+  if (type == 4) { sendInputCalibrationReads(); return; }   //return vm pin readings over serial output to computer
+  if (type == 5) { writeForOutputCalibration(); return; }   //writes value in cp.lastDataTransfer[3], write mode ends if that valus is above 5000 (0-4095 acceptable)
+  if (type == 6) { setFollowModeForCalibration(); return; } //the latter doesn't really do anything as any serial i/o would interrupt follow, but it's nice to program an expected input
 }
 
 
@@ -173,6 +181,8 @@ FASTRUN void clamp() {  //runs until serial I/O. Unless the serial i/o shuts off
 }
 
 FASTRUN void clampStep() {
+  if (!cp.isRunning) { return; }  //only take a clamp step if running
+  
   calcTargetCurrent(); //sets sp.lastTotalCurrent as the sum of leak conductance current and arbitrary conductance current
   sp.current_cmd12bit = get12bitCmdForCurrent(sp.lastTotalCurrent);
   analogWrite(dac_pin0,sp.current_cmd12bit);
@@ -234,7 +244,7 @@ FASTRUN void updateCurrentHistory() {
     }
   }  
   
-  sp.lastReadMillis = millis() - sp.startMillis;    //record time of this reading relative to program start
+  sp.lastReadMillis = millis() - sp.startMillis;    //record time of this reading relative to running start
   sp.currentCmds[sp.historyPos] = sp.lastTotalCurrent;     //sp.lastVm is updated in calcTargetCurrent()
   sp.dts[sp.historyPos] = sp.dt;
   if (sp.wasPaused) { sp.wasPaused = 0; } //when receiving i(v) data or not clamping, dt could get long and don't want to include in calculation
@@ -261,15 +271,19 @@ void initStateParams() {    //state params initialization + first vm measurement
 
 //based on Serial input, update state variables
 FASTRUN void updateState() {
-  cp.leakClamping = cp.lastDataTransfer[1] > 0;
-  cp.dynamicClampingArbitraryInput = cp.lastDataTransfer[2] > 0;
-  cp.dcOffset_pA = cp.lastDataTransfer[3];
-  cp.leak_nS = cp.lastDataTransfer[4];
-  cp.leak_mV = cp.lastDataTransfer[5];
-  cp.junctionPotential = cp.lastDataTransfer[6];
+  bool wasRunning = cp.isRunning;
+  cp.isRunning = cp.lastDataTransfer[1] > 0;
+  if (!wasRunning && cp.isRunning) { sp.startMillis = millis(); }   //running just started, reset timer
+  cp.leakClamping = cp.lastDataTransfer[2] > 0;
+  cp.dynamicClampingArbitraryInput = cp.lastDataTransfer[3] > 0;
+  cp.aec = cp.lastDataTransfer[4] > 0 ;
+  cp.dcOffset_pA = cp.lastDataTransfer[5];
+  cp.leak_nS = cp.lastDataTransfer[6];
+  cp.leak_mV = cp.lastDataTransfer[7];
+  cp.junctionPotential = cp.lastDataTransfer[8];
   //position 0 MUST be nan and position 5 MUST be real, currently. This and other positions could be used
   //with the potential need for modifications to loop() and updateCalibration() 
-  //positions 7-15 are expected to be nan and can be used to send additional parameters
+  //positions 8-15 are expected to be nan and can be used to send additional parameters
 }
 
 FASTRUN void updateCalibration() {
@@ -289,6 +303,7 @@ void initControlParams() {   //control parameters setup (these will be reset by 
   cp.input_offset = input_offset_default;
   cp.output_slope = output_slope_default;
   cp.output_offset = output_offset_default;
+  cp.isRunning = 0;
   cp.leakClamping = 0;     
   cp.dynamicClampingArbitraryInput = 0;  
   cp.dcOffset_pA = 0; 

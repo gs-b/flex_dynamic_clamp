@@ -25,8 +25,8 @@
 //FOR CLAMP:
 //
 //FOR CALIBRATION:
-//After output-side calibration, the teensy will not re-enter input-side calibration mode 
-//current way around this is to disconnect from the port and reload the ino sketch
+//If calibration is run with GUI active and running checkbox checked, user may have to send an update to teensy to start run again.
+//would like to automate this in future
 
 //DESIGN GOALS
 //1. All extended-time tasks (waiting for teensy to respond and send back information) occur in background 
@@ -91,14 +91,15 @@ function startGUI(comStr)
 	String includeSetVarDataInSettings = "1;1;1;"		//whether to send set var data to teensy, likely yes for all	
 	
 	//checkbox specificatipons
-	Variable cbHeight=14,cbWidth=140,cbVertSpacing,cbRows=3
-	String checkboxes="leakClamping;arbClamping;liveUpdating;runAec;"			//in future, might be good to append something like CB to avoid name conflicts
-	String cbTitles="Leak clamp;Arb. clamp;Auto;AEC;"
-	String cbHelpStrs="Run leak clamp (simulate a leak conductance based on nS, mV to the left;"
+	Variable cbHeight=14,cbWidth=150,cbVertSpacing=0,cbRows=3
+	String checkboxes="running;leakClamping;arbClamping;liveUpdating;runAec;"			//in future, might be good to append something like CB to avoid name conflicts
+	String cbTitles="Running;Leak clamp;Arb. clamp;Auto;AEC;"
+	String cbHelpStrs="Run clamp (zero current output if no other buttons clicked -- cannot be running during calibration!;"
+	cbHelpStrs+="Run leak clamp (simulate a leak conductance based on nS, mV to the left;"
 	cbHelpStrs+="Initiate arbitrary (arb.) clamp;"
 	cbHelpStrs+="Send changes to GUI immediately (automatically). SHIFT click when unchecked to send a single update for all;"
 	cbHelpStrs+="Use AEC (Active Electrode Compensation). Requires a calculated and sent electrode kernel. SHIFT click to calculate. CTRL+SHIFT click to send to teensy;"
-	String includeCbInSettings = "1;1;0;1;"		//whether to send checkbox data to teensy, likely only arbitrary clamp
+	String includeCbInSettings = "1;1;1;0;1;"		//whether to send checkbox data to teensy, likely only arbitrary clamp
 	
 	//data folder (currently  stores iv relation, calibration data, and teensy status history wave) -- a design goal was to avoid global variables, but these are unavoidable
 	//currently won't be killed with window. Could add a window hook to do so, but would probably want to prompt user in case they want to keep the I(V) waves
@@ -170,20 +171,27 @@ function startGUI(comStr)
 	
 	//add checkboes
 	num = itemsinlist(checkboxes)
-	currTop = 0
+	int currRow,currCol
+	Variable cbLeft,cbCols = floor((num-1)/cbRows) + 1
+	print "cbCols",cbCols
 	currLeft = sliderWidth + sliderRightSpacing
 	setwindow $panelN,userdata(cbsToSend)=""		//tracks what cbs will be sent to teensy, filled in in loop below
 	for (i=0;i<num;i++)
+		currRow = mod(i,cbRows)
+		currCol = floor(i/cbRows)
+		currTop = (cbHeight + cbVertSpacing)*currRow
+		cbLeft = currLeft + currCol*cbWidth/cbCols
 		name = stringfromlist(i,checkboxes)
 		help = stringfromlist(i,cbHelpStrs)
 		if (stringmatch(stringfromlist(i,includeCbInSettings),"1"))
 			setwindow $panelN,userdata(cbsToSend)+=name+";"
 		endif
 		
-		Checkbox $name win=$panelN,pos={currLeft,currTop},size={cbWidth,cbHeight},fsize=fontSize,proc=teensy_gui_cbHandling,title=stringfromlist(i,cbTitles),help={stringfromlist(i,cbHelpStrs)}
+		Checkbox $name win=$panelN,pos={cbLeft,currTop},size={cbWidth/cbCols,cbHeight},fsize=fontSize,proc=teensy_gui_cbHandling,title=stringfromlist(i,cbTitles),help={stringfromlist(i,cbHelpStrs)}
 		
-		currTop += cbHeight + cbVertSpacing
 	endfor
+	
+	currTop = (cbHeight + cbVertSpacing)*cbRows
 	
 	//add I(V) relation popup menu
 	Button sendIvRel win=$panelN,pos={currLeft,currTop},size={cbWidth,cbHeight},fsize=fontSize,proc=teensy_gui_btnHandling,title="Send I(V)",help={"Send I(V) relation in red below for use arbitrary clamp I(V)"}
@@ -191,7 +199,7 @@ function startGUI(comStr)
 	//add I(V) graph
 	currtop+=20
 	graphN=panelN+"_ivDisp"
-	display/host=$panelN/w=(currLeft,currTop,currLeft+cbWidth,currTop+cbWidth*0.9)/n=$graphN ivRel_lastSent/tn=lastSent,ivRel_toSend/tn=toSend,leakRel/tn=leakRel,totalRel/tn=totalRel
+	display/host=$panelN/w=(currLeft,currTop,currLeft+cbWidth,currTop+cbWidth*0.8)/n=$graphN ivRel_lastSent/tn=lastSent,ivRel_toSend/tn=toSend,leakRel/tn=leakRel,totalRel/tn=totalRel
 	modifygraph/w=$(panelN+"#"+graphN) rgb(lastSent)=(0,0,0),lsize(lastSent)=2
 	
 	currTop += cbWidth
@@ -211,6 +219,10 @@ function teensy_gui_killed_hook(s)
 	if (s.eventCode != 2)		//ignore all but window killed
 		return 0
 	endif
+	
+	//try to turn off the running flag so teensy isn't doing anything while disconnected and also can be calibrated with GUI off
+	Checkbox running win=$s.winname,value=0
+	teensy_gui_sendSettings(s.winname,1,noReceiveBg=1)
 	
 	//close the com port
 	String comStr = getUserData(s.winName,"","comStr")
@@ -349,8 +361,14 @@ function teensy_gui_cbHandling(s) : CheckBoxControl
 		
 			//continue to arb clamping
 			
+		case "running":	
+			//continue to arb clamping	
+			
 		case "leakClamping":		//connect or disconnect
 			//continue to arb clamping
+			
+		case "runAec":
+			//continue to arb clamping	
 			
 		case "arbClamping":		//toggle arbitrary clamp
 			teensy_gui_sendSettings(s.win,0)		//update teensy if liveUpdating
@@ -468,7 +486,7 @@ function/WAVE teensy_gui_getSettingsWv(panelN)
 	
 	int i,index; String name
 	for (i=0;i<num;i+=1)
-		index = i + 1		//for the 0th position reserved for telling teensy what's coming
+		index = i + 1		//+1 because the 0th position is reserved for telling teensy what's coming (via nan value at present)
 		if (index >= k_floatsPerStandardDataTransfer)
 			teensy_gui_postMessage(panelN,"teensy_gui_getSettingsWv(): Unexpectedly sending too many settings to teensy! Beyond limit set by "+num2str(k_floatsPerStandardDataTransfer)+" not all will be sent",1)
 			break
@@ -481,13 +499,15 @@ function/WAVE teensy_gui_getSettingsWv(panelN)
 	
 	//so output to teensy is currently:
 	//0: NaN
-	//1: leak clamp (0 or 1)
-	//2: arbitrary clamp (0 or 1)
-	//3: dc current (pA)
-	//4: leak condutance (nS)
-	//5: leak reversal potential (mV)
-	//6: junction potential
-	//7-15: NaN (available for additional parameters)
+	//1: running (0 or 1)
+	//2: leak clamp (0 or 1)
+	//3: arbitrary clamp (0 or 1)
+	//4: AEC clamp (0 or 1)  [end of variable length section that depends on number of checkbox values to send]
+	//5: dc current (pA)
+	//6: leak condutance (nS)
+	//7: leak reversal potential (mV)
+	//8: junction potential
+	//9-15: NaN (available for additional parameters)
 
 	return settingsWv
 end
@@ -737,8 +757,8 @@ function teensy_gui_btnHandling(s) : ButtonControl
 		case "sendIvRel":
 			if (s.eventCode == 2)	//only respond to mouse up (while still over button) after click down on button
 				variable sendIv = 1
-				prompt sendIv,"Send I(V) relation (red trace) to Teensy? WARNING: INTERRUPTS ANY ONGOING ARBITRARY CLAMP"
-				doprompt "Really send I(V) despite interruption? (1 for yes, 0 for no)",sendIv
+				prompt sendIv,"Send I(V) relation (red trace) to Teensy? WARNING: SLOWS ANY ONGOING ARBITRARY CLAMP"
+				doprompt "Really send I(V) despite slowing? (1 for yes, 0 for no)",sendIv
 				if (!V_flag && sendIV)
 					//teensy_sendIvRel(s.win)
 					teensy_gui_sendFloats(s.win,"ivRel_toSend",0,1)		//send iv rel
@@ -877,7 +897,7 @@ function teensy_gui_sendFloatsBg(s)
 	vdt2/p=$comStr killio
 	
 	//send data
-	VDTWriteBinaryWave2/B/O=(3)/TYPE=(2)/Q currSendWv
+	int V_VDT = teensy_sendBinary(currSendWv)
 	if (V_VDT < 1)
 		teensy_gui_postMessage(panelN,"Send settings: failed unexpectedly after VDTWriteBinaryWave2 in teensy_sendOneSetOfFloats()!!!",1)
 		return 1
@@ -894,7 +914,7 @@ end
 //begin a background function that will check for response from teensy and update GUI accordingly
 //return 0 if failed to start background function, 1 if started successfully
 static constant k_pollingFrequency_ticks = 1		//poll as quickly as possible, every ~6 ms
-static constant k_backgroundWaitTimeLimit_ticks = 600		//wait only up to 4 secs (Was getting some time-out at 2s)
+static constant k_backgroundWaitTimeLimit_ticks = 240		//wait only up to 4 secs (Was getting some time-out at 2s)
 static strconstant ks_teensyFloatRespBgTaskStartStr = "teensyFloatRespBgTask_"
 function teensy_sendOneSetOfFloats(panelN,wv,ignoreWaitingForResponse,doNotClearWaitingStatus,[noReceiveBg])
 	String panelN	//teensy GUI panelN
@@ -936,7 +956,7 @@ function teensy_sendOneSetOfFloats(panelN,wv,ignoreWaitingForResponse,doNotClear
 	endif
 	
 	//send data
-	VDTWriteBinaryWave2/B/O=(3)/TYPE=(2)/Q wv
+	int V_VDT = teensy_sendBinary(wv)
 	if (V_VDT < 1)
 		teensy_gui_postMessage(panelN,"Send settings: failed unexpectedly after VDTWriteBinaryWave2 in teensy_sendOneSetOfFloats()!!!",1)
 		return 0
@@ -960,6 +980,14 @@ function teensy_sendOneSetOfFloats(panelN,wv,ignoreWaitingForResponse,doNotClear
 	CtrlNamedBackground $taskName,start=1
 	
 	return 1
+end
+
+//meant to be very low level. vdt port must be set ahead of time
+function teensy_sendBinary(wv)
+	WAVE Wv
+	
+	VDTWriteBinaryWave2/B/O=(3)/TYPE=(2)/Q wv
+	return V_VDT
 end
 
 function teensy_gui_setResponseWaitStatus(panelN,waiting)
@@ -1070,9 +1098,7 @@ function teensy_gui_readFloats(panelN)		//read floats that teensy sends. Meant o
 	
 	String folderPath = getUserdata(panelN,"","folderPath")
 	WAVE respWv = $(folderPath+":lastTeensyResponse")		//could add /z and make one if doesnt exist, but really should exist for sure as is! except for disruptive user..
-	VDTReadBinaryWave2/B/O=(k_vdtReadInternalTimeOutSecs)/Q/TYPE=(2) respWv
-	setwindow $panelN userdata(vdtRead2_lastItemsRead)=num2str(V_VDT)
-	return v_vdt
+	teensy_readOneFloatSetDuringExecution(respWv=respWv)
 end
 
 constant k_calibration_typeNum = 0		//must match expected spcial case type number in sketch
@@ -1096,8 +1122,8 @@ function teensy_gui_sendCalibration(panelN,bypassNonLiveMode)
 	insertpoints/m=0/v=(NaN) 0,3,calTemp; calTemp[2] = k_calibration_typeNum
 	int pnts = dimsize(calTemp,0)
 	int neededPnts = k_floatsPerStandardDataTransfer - pnts
-	if (neededPnts > 0)		//pnts should be 4 but can be up to 16 and no longer
-		InsertPoints/M=0/V=(NaN)  pnts+1, neededPnts,calTemp		//pad length to 16 with nan
+	if (neededPnts > 0)		//pnts should be 4 but can be up to k_floatsPerStandardDataTransfer and no longer
+		InsertPoints/M=0/V=(NaN)  pnts+1, neededPnts,calTemp		//pad length to k_floatsPerStandardDataTransfer with nan
 	elseif (neededPnts < 0)	//really shouldnt happen
 		redimension/n=(k_floatsPerStandardDataTransfer) calTemp
 		teensy_gui_postMessage(panelN,"teensy_gui_sendCalibration() calibrationWv unexpected very long, longer than k_floatsPerStandardDataTransfer, but 4 points expeted! whats going on??!! Teensy may be innacurate. Run teensyCal_doCals() after switching to NIDAQ control",1)
@@ -1189,10 +1215,10 @@ function teensy_gui_recordSteps(panelN,numSteps,stepMicros,baselineCurrent,stepC
 	
 end 
 
-#if (exists("fdaqmx_writechan"))		//only compile of daq procs are available via the xop	
 
 //FOR CALIBRATION
 
+#if (exists("fdaqmx_writechan"))		//only compile of daq procs are available via the xop	
 
 static constant k_teensyNumReadReturns = 30		//how many reads does the teensy return when prompted (set by its .ino sktch)
 static constant k_teensyReadSetsToAvg = 100 //how many sets of teensy reads to average (each set has reads = k_teensyNumReadReturns) 
@@ -1204,14 +1230,353 @@ static constant k_dacSampleRate = 10000
 static constant k_dacAvgNum = 10		//dac is capable of averaging 10 samples even at 10kHz, supposedly
 static constant k_dacAvgLenSecs = 0.2	//2 //number of seconds to average
 
-function teensyCal_follow(dacNum,statsRef,sinFreq,sinMin,sinMax)
-	Variable dacNum		//dac num (0 or 1 at present) to follow on teensy correspondance determined by ino sketch
+
+//runs input-side and output-side calibration, stores calibration results for teensy GUI to send to teensy upon start / continue
+function teensyCal_doCals(statsRefStartStr,[skipCalAndForceSavingThisWv])
+	String statsRefStartStr
+	WAVE skipCalAndForceSavingThisWv
+	
+	int doCal = PAramIsDefault(skipCalAndForceSavingThisWv)
+	
+	String lbl = "date="+date()+";time="+time()+";"
+	
+	String inputStatsRef=statsRefStartStr+"_input_dac0",outputStatsRef=statsRefStartStr+"_output"
+	if (doCal)
+		print "teensyCal_doCals() starting teensyCal_inputCal()"
+		WAVE inputCalWv = teensyCal_inputCal(inputStatsRef)		//currently running on dac0 by default, others not configured
+		print "teensyCal_doCals() starting teensyCal_outputCal() in 3 seconds..."
+		sleep/s 1
+		WAVE outputCalWv = teensyCal_outputCal(outputStatsRef)
+		concatenate/dl/np=(0)/free/o {inputCalWv,outputCalWv},calWvs_combined
+	else
+		duplicate/o/free skipCalAndForceSavingThisWv,calWvs_combined
+	endif
+
+	//store calibration data in a folder  -- may have to build folder since panel may not exist
+	String panelN = "teensy_clamp_" + ks_teensyCom
+	String folderPath = "root:Packages:"+panelN
+	NewDataFolder/o root:Packages
+	newDataFolder/o $folderPath
+	WAVE/Z calibrationWv = $(folderPath+":calibrationWv")
+	int col
+	if (!WaveExists(calibrationWv))
+		duplicate/o calWvs_combined,$(folderPath+":calibrationWv")/wave=calibrationWv
+		redimension/n=(-1,1) calibrationWv
+		col = 0
+	else
+		col = dimsize(calibrationWv,1)
+		concatenate/dl/np=(1) {calWvs_combined},calibrationWv
+	endif
+	setdimlabel 1,col,$lbl,calibrationWv
+	note calibrationWv,"inputStatsRef:"+inputStatsRef+";outputStatsRef:"+inputStatsRef+";"
+end
+
+function/wave teensyCal_inputCal(statsRef)
+	String statsRef		//save results. also displays to 
+	
+	Variable input_membrane_mV_per_amplifier_V = 1000/input_amplifier_mV_per_membrane_mV		//easier to invert and convert to mV membrane potential per V amplifier change since we can read that in raw volts
+	
+	STring dispWinName = statsRef + "_inputCalWin"
+	
+	//additional parameters for calibration. Could move these to the function declaration
+	Variable vMin = -9.8,vMax=9.8		//min is -10,max is +10 
+	Variable vEnd = 0		//where to put value at end
+	Variable vFitStart=vMin,vFitEnd=vMax		//not necessarily linear throughout range, range to fit for linearity of gain
+	Variable numAdditionalLevels=14		//# linearly distributed levels to test between vMin and vMax
+	
+	Variable numLevels = 2+ numAdditionalLevels		//vMin and vMax plus any additional
+	
+	//connect to teensy and ensure that it is not in running mode
+	vdtoperationsport2 $ks_teensyCom;VDT2/P=$ks_teensyCom baud=k_comBaud;
+	int off = teensyCal_setRunningModeOffDuringExecution()
+	if (!off)
+		print "teensyCal_inputCal() failed to set teensy running mode to off! calibration may fail / look like a flat relationship. May need to reload sketch onto teensy"
+	endif
+	
+	//waves to hold results
+	String statTypeDescs="cmdVoltage;teensyInputVoltage;equivMemVoltage;teensyReads"
+	int numStatTypes = itemsinlist(statTypeDescs)
+	make/o/d/n=(4)/free/W wstest; wavestats/q/w wstest;WAVE M_wavestats;Variable numStats = dimsize(M_wavestats,0)	//just find out how many rows there are in wavestats output
+	make/o/d/n=(numLevels,numStats,numStatTypes) $statsRef/wave=stats; stats = nan
+	setscale/I x,vMin,vMax,stats		//assign level scaling (and let Igor calculate intermediate levels)
+	copydimlabels/rows=1 M_wavestats,$statsRef
+	dl_assignLblsFromList(stats,2,0,statTypeDescs,"",0)		//assign layer labels -- order must stay or else update fit code below
+	
+	//make waves to store raw reads from the command and input copies going into the dac,setup reading into them
+	Variable avgPnts = k_dacAvgLenSecs * k_dacSampleRate
+	make/o/d/n=(avgPnts) cmdCopy,inputCopy
+	make/o/d/n=(4) cmdWaveform		//fdaqmx_writeChan seems to be failing to complete before returning, trying to write a wave with the commanded value
+	setscale/p x,0,1/k_dacSampleRate,"s",cmdCopy,inputCopy,cmdWaveform
+	Variable ok = fDAQmx_ScanStop(ks_dacName)		//assure not already scanning
+	
+	//run the calibration
+	int i;Double level,rangeMinV,rangeMaxV
+	make/o/free/n=(numLevels+1,10) daqErrors = nan	//error tracing
+	String winN
+	for (i=0;i<numLevels;i+=1)
+		level = pnt2x(stats,i)
+		rangeMinV = min(level-k_cmdResolutionRange/2,-10)	//mostly a nidaq quirk that has to be dealt with, see fdaqmx_writechan
+		rangeMaxV = max(level+k_cmdResolutionRange/2,10)		//mostly a nidaq quirk that has to be dealt with, see fdaqmx_writechan
+		cmdWaveform = level
+		daqErrors[i][0]=fDAQmx_WaveformStop(ks_dacName)
+		DAQmx_WaveformGen/DEV=ks_dacName/NPRD=0/STRT=1 "cmdWaveform, "+num2str(k_teensyCmdChanNum)+";"	
+		doupdate;sleep/s k_waitAfterNewLevelSecs;doupdate;	//let things settle (shouldnt be strictly necessary)
+		daqmx_scan/DEV=ks_dacName/AVE=(k_dacAvgNum)/STRT=1/BKG/EOSH="print \"scan complete\""  WAVES=("cmdCopy,"+num2str(k_teensyCmdCopyChanNum)+";inputCopy,"+num2str(k_teensyInputCopyChanNum)+";")
+			//get and store teensy reads
+		WAVE teensyReadSet = teensyCal_getReadSet()		//get teensy reads
+		WAVESTATS/q/w teensyReadSet; stats[i][][%teensyReads]=M_wavestats[q]
+			//get and store dac reads
+		daqErrors[i][2]  = fDAQmx_ScanWait(ks_dacName)	//wait til cmdCopy and inputCopy have been filled
+			//raw read stats
+		wavestats/q/w cmdCopy; stats[i][][%cmdVoltage]=M_wavestats[q]
+		wavestats/q/w inputCopy;stats[i][][%teensyInputVoltage]=M_wavestats[q]
+			//scaled stats
+		stats[i][%avg][%equivMemVoltage]=stats[i][%avg][%cmdVoltage]*input_membrane_mV_per_amplifier_V
+		stats[i][%sdev][%equivMemVoltage]=stats[i][%sdev][%cmdVoltage]*input_membrane_mV_per_amplifier_V
+		stats[i][%sem][%equivMemVoltage]=stats[i][%sem][%cmdVoltage]*input_membrane_mV_per_amplifier_V
+				
+		//output
+		if (i==0)
+			killwindow/Z $dispWinName
+			display/k=1/N=$dispWinName stats[][%avg][%teensyReads]/tn=teensyReads vs stats[][%avg][%equivMemVoltage]
+			winN=s_name
+			appendtograph/w=$winN/l=L_input stats[][%avg][%teensyInputVoltage]/tn=teensyInput vs stats[][%avg][%equivMemVoltage]
+			appendtograph/w=$winN/l=left_sdev/b=bottom_sdev2 stats[][%sdev][%teensyReads]/tn=teensyReads_sdev vs stats[][%sdev][%teensyInputVoltage]
+			appendtograph/w=$winN/l=L_input_sdev/b=bottom_sdev stats[][%sdev][%teensyInputVoltage]/tn=teensyInput_sdev vs stats[][%sdev][%equivMemVoltage]
+			errorbars/w=$winN/T=0/L=0.6/RGB=(0,0,0) teensyReads,xy,wave=(stats[][%sdev][%equivMemVoltage],stats[][%sdev][%equivMemVoltage]),wave=(stats[][%sdev][%teensyInputVoltage],stats[][%sdev][%teensyInputVoltage])		//error bars of sdev for x and y
+			errorbars/w=$winN/T=0/L=0.6/RGB=(0,0,0) teensyInput,xy,wave=(stats[][%sdev][%equivMemVoltage],stats[][%sdev][%equivMemVoltage]),wave=(stats[][%sdev][%teensyInputVoltage],stats[][%sdev][%teensyInputVoltage])		//error bars of sdev for x and y
+			modifygraph/W=$winN axisenab(bottom)={0,0.4},axisenab(bottom_sdev)={0.61,1},axisenab(bottom_sdev2)={0.61,1}
+			modifygraph/w=$winN freepos=0,lblpos=52,axisenab(left)={0.55,1},axisenab(l_input)={0,0.45}
+			modifygraph/w=$winN freepos=0,lblpos=52,axisenab(left_sdev)={0.62,1},axisenab(l_input_sdev)={0,0.38}
+			Label/w=$winN left "Teensy reads";Label/w=$winN bottom "Mem voltage";Label/w=$winN L_input "Scaled voltage"
+			Label/w=$winN left_sdev "Read SDEV (raw)";Label/w=$winN bottom_sdev "Input Mem voltage SDEV (mV)\\u#2";
+			ModifyGraph/w=$winN prescaleExp(L_input_sdev)=3,prescaleExp(bottom_sdev)=3;Label/w=$winN L_input_sdev "SDEV (mV)\\u#2";//show in mV
+			Label/w=$winN bottom_sdev2 "Scaled input SDEV \\U"
+			ModifyGraph/w=$winN freePos(L_input_sdev)={0,bottom_sdev},freePos(left_sdev)={0,bottom_sdev2},freepos(bottom_sdev2)={0,left_sdev},lblPos(bottom_sdev2)=33
+			ModifyGraph/w=$winN mode(teensyReads)=4,marker(teensyReads)=19,msize(teensyReads)=1,mode(teensyInput)=4,marker(teensyInput)=19,msize(teensyInput)=1		//dots for points
+		endif
+		doupdate;Print "teensyCal_inputCal() completed level #=",i,"level=",level
+	endfor
+	
+	vdtcloseport2 $ks_teensyCom
+	
+	daqErrors[i][0] =fdaqmx_writechan(ks_dacName,k_teensyCmdChanNum,vEnd,rangeMinV,rangeMaxV)	//command the level as output -- not sure why but this isnt working
+	
+	
+	//fit line to input-output relation
+	Variable avgCol = finddimlabel(stats,1,"avg")
+	Variable equivMemVoltageLayer = finddimlabel(stats,2,"equivMemVoltage")
+	Variable teensyReadLayer = finddimlabel(stats,2,"teensyReads")
+	STring coefsSafeRef = statsRef +"_coefs"
+	make/o/d/n=(2) $coefsSafeRef/wave=coefs
+	curvefit/n line, kwcwave=coefs, stats[][avgCol][teensyReadLayer]/x=stats[][avgCol][equivMemVoltageLayer]/d //vs stats(vFitStart,vFitEnd)[%avg][%teensyReads]
+	ModifyGraph/w=$winN rgb($("fit_"+statsRef))=(1,4,52428)
+	
+	Double slope = coefs[1],offset=coefs[0]
+	print "convert from teensy reads with: (Mem voltage)=((teensyRead)-(offset))/(slope); (Mem voltage)=((teensyRead)-("+num2str(offset)+"))/("+num2str(slope)+")"
+	//use scaling to convert read SDEV into read mV sdev
+	modifygraph/w=$winN muloffset(teensyReads_sdev)={0,1/slope};Label/w=$winN left_sdev "Read SDEV (mV)\\u#2";
+	
+	make/o/d/free out = {slope,offset}
+	dl_assignlblsfromlist(out,0,0,"inputCal_slope;inputCal_offset;","",0)
+	return out
+end
+
+
+//functions to read from the teensy
+function/WAVE teensyCal_getReadSet([outRef])
+	String outRef	//from command line, can copy into a real wave
+	
+	Variable i
+	for (i=0;i<k_teensyReadSetsToAvg;i++)
+		WAVE/I currReads = teensyCal_getReads()
+		if (i==0)
+			duplicate/o/free/i currReads,out
+		else
+			concatenate/np=0 {currReads},out
+		endif
+	endfor
+	
+	if ( PAramISDefault(outRef) || (strlen(outRef) < 1) )
+		return out
+	endif
+	
+	duplicate/o out,$outRef
+end
+
+function/WAVE teensyCal_getReads()
+	
+	VDT2/P=$ks_teensyCom killio	//delete and previous serial i/o
+	
+	make/o/d/n=(k_floatsPerStandardDataTransfer) sendWv; sendWv[0,1] = nan; sendWv[2] = 4; sendWv[3,] = nan;
+	int V_VDT = teensy_sendBinary(sendWv);
+	
+	if (!V_VDT)		//failed
+		print "teensyCal_getReads() failed to send command for reads"
+		make/o/free/i out = {-1}		//teensy cant have negative values, so this will indicate an error
+		return out
+	endif
+	
+	//wait for a return from the teensy over serial i/o
+	WAVE readWv = teensy_readOneFloatSetDuringExecution(untilTicks = k_teensyReturnTimeOutSecs*60,timeOutMsg="teensyCal_getReads() unexpectedly failed to get reads")
+	redimension/i readWv
+	return readWv
+end
+
+function teensyCal_setRunningModeOffDuringExecution()
+	VDT2/P=$ks_teensyCom killio	//delete and previous serial i/o
+	
+	make/o/d/n=(k_floatsPerStandardDataTransfer) sendWv; sendWv[0] = nan; sendWv[1,8] = 0; sendWv[9,] = nan;
+	int V_VDT = teensy_sendBinary(sendWv);
+	if (!V_VDT)		//failed
+		print "teensyCal_getReads() failed to send command for reads"
+		make/o/free/i out = {-1}		//teensy cant have negative values, so this will indicate an error
+		return 0
+	endif
+	
+	//wait for a return from the teensy over serial i/o
+	WAVE readWv = teensy_readOneFloatSetDuringExecution(untilTicks = k_teensyReturnTimeOutSecs*60,timeOutMsg="teensyCal_getReads() unexpectedly failed to get reads")
+	return 1	
+end
+
+
+function/WAVE teensyCal_outputCal(statsRef)
+	STring statsRef
+	
+	STring dispWinName = statsRef + "_outputCalWin"
+	
+	Variable vMin = 0,vMax=4095
+	Variable vFitStart = 30,vFitEnd=4065
+	Variable numAdditionalLevels=14
+	
+	Variable numLevels = 2+ numAdditionalLevels		//vMin and vMax plus any additional
+	
+	vdtoperationsport2 $ks_teensyCom;VDT2/P=$ks_teensyCom baud=k_comBaud;		//connect to teensy
+	int off = teensyCal_setRunningModeOffDuringExecution()
+	if (!off)
+		print "teensyCal_inputCal() failed to set teensy running mode to off! calibration may fail / look like a flat relationship. May need to reload sketch onto teensy"
+	endif
+
+	//numRows == numLevels; numCols == numWaveStats; numLayers == num statTypes "teensyOutputVoltage;scaledOutputVoltage;equivCurrent;"
+	String statTypeDescs="teensyOutputVoltage;scaledOutputVoltage;equivCurrent;"
+	int numStatTypes = itemsinlist(statTypeDescs)
+	make/o/d/n=(4)/free/W wstest; wavestats/q/w wstest;WAVE M_wavestats;Variable numStats = dimsize(M_wavestats,0)	//just find out how many rows there are in wavestats output
+	make/o/d/n=(numLevels,numStats,numStatTypes) $statsRef/wave=stats; stats = nan
+	setscale/I x,vMin,vMax,stats		//assign level scaling (and let Igor calculate intermediate levels)
+	copydimlabels/rows=1 M_wavestats,$statsRef
+	//dl_lblsToLbls("M_wavestats",0,0,inf,statsRef,1,0,"",0)		//assign wave stats labels to columns	
+	redimension/n=(-1,numStats+2,-1) stats;		//make a place to store exact cmdVal and what is reported as output just in case
+	stats = nan
+	dl_assignLblsFromList(stats,1,numStats,"cmdVal;returnedVal;","",0)
+	numStats+=2;
+	dl_assignLblsFromList(stats,2,0,statTypeDescs,"",0)		//assign layer labels -- order must stay or else update fit code below
+	
+	//make waves to store raw reads from the command and input copies going into the dac,setup reading into them
+	Variable avgPnts = k_dacAvgLenSecs * k_dacSampleRate
+	make/o/d/n=(avgPnts) teensyOutputVoltage,scaledOutputVoltage
+	setscale/p x,0,1/k_dacSampleRate,"s",teensyOutputVoltage,scaledOutputVoltage
+	Variable ok = fDAQmx_ScanStop(ks_dacName)		//assure not already scanning	
+
+	//run the test
+	int i;Double level,rangeMinV,rangeMaxV
+	make/o/free/n=(numLevels+1,10) daqErrors = nan	//error tracing
+	String winN
+	for (i=0;i<numLevels;i+=1)
+		level = round(pnt2x(stats,i))		//make it an integer
+		level = max(level,0)		//keep within limits
+		level = min(level,4095)
+		stats[i][%cmdVal][] = level
+		WAVE teensyReturn = teensyCal_writeOutputCalVal(level)
+		stats[i][%returnedVal][] = teensyReturn[2]
+		doupdate;sleep/s k_waitAfterNewLevelSecs;doupdate;
+		
+		daqmx_scan/DEV=ks_dacName/AVE=(k_dacAvgNum)/STRT=0/BKG WAVES=("teensyOutputVoltage,"+num2str(k_teensyOutputCopyChanNum)+";scaledOutputVoltage,"+num2str(k_teensyScaledOutputCopyChanNum)+";")
+		daqErrors[i][1]  = fdaqmx_scanstart(ks_dacName,0)		//start dac reading in background, fills cmdCopy and inputCopy
+			//get and store dac reads
+		daqErrors[i][2]  = fDAQmx_ScanWait(ks_dacName)	//wait til cmdCopy and inputCopy have been filled
+		wavestats/q/w teensyOutputVoltage; stats[i][0,numStats-3][%teensyOutputVoltage]=M_wavestats[q]
+		wavestats/q/w scaledOutputVoltage;stats[i][0,numStats-3][%scaledOutputVoltage]=M_wavestats[q]
+		daqErrors[i][3]  = fDAQmx_ScanStop(ks_dacName)
+			//scaled stats
+		stats[i][%avg][%equivCurrent]=stats[i][%avg][%scaledOutputVoltage]*output_injected_pA_per_commanded_V
+		stats[i][%sdev][%equivCurrent]=stats[i][%sdev][%scaledOutputVoltage]*output_injected_pA_per_commanded_V
+		stats[i][%sem][%equivCurrent]=stats[i][%sem][%scaledOutputVoltage]*output_injected_pA_per_commanded_V
+		
+		//output
+		if (i==0)
+			killwindow/Z $dispWinName
+			display/k=1/N=$dispWinName stats[][%avg][%equivCurrent]/tn=equivCurrent vs stats[][%cmdVal][0]
+			winN=s_name  
+			appendtograph/w=$winN/l=L_input stats[][%avg][%teensyOutputVoltage]/tn=teensyOutputVoltage vs stats[][%cmdVal][0]
+			appendtograph/w=$winN/l=left_sdev/b=bottom_sdev stats[][%sdev][%equivCurrent]/tn=equivCurrent_sdev vs stats[][%cmdVal][0]
+			appendtograph/w=$winN/l=L_input_sdev/b=bottom_sdev stats[][%sdev][%teensyOutputVoltage]/tn=teensyOutputVoltage_sdev vs stats[][%cmdVal][0]
+			
+			errorbars/w=$winN/T=0/L=0.6/RGB=(0,0,0) equivCurrent,y,wave=(stats[][%sdev][%equivCurrent],stats[][%sdev][%equivCurrent])
+			errorbars/w=$winN/T=0/L=0.6/RGB=(0,0,0) teensyOutputVoltage,y,wave=(stats[][%sdev][%teensyOutputVoltage],stats[][%sdev][%teensyOutputVoltage])
+			modifygraph/W=$winN axisenab(bottom)={0,0.4},axisenab(bottom_sdev)={0.61,1}
+			modifygraph/w=$winN freepos=0,lblpos=52,axisenab(left)={0.55,1},axisenab(l_input)={0,0.45}
+			modifygraph/w=$winN freepos=0,lblpos=52,axisenab(left_sdev)={0.62,1},axisenab(l_input_sdev)={0,0.38},lblPos(left)=57
+			Label/w=$winN left "Scaled\routput (pA)";Label/w=$winN bottom "Teensy Cmd (0-4095)";Label/w=$winN L_input "Unscaled\rTeensy Output (V)"
+			Label/w=$winN left_sdev "SDEV (pA)\\U";Label/w=$winN bottom_sdev "Teensy Cmd (0-4095)";Label/w=$winN L_input_sdev "SDEV (mV)\\u#2";ModifyGraph/w=$winN prescaleExp(L_input_sdev)=3
+			ModifyGraph/w=$winN freePos(L_input_sdev)={0,bottom_sdev},freePos(left_sdev)={0,bottom_sdev}
+			ModifyGraph/w=$winN  mode(equivCurrent)=4,marker(equivCurrent)=19,msize(equivCurrent)=1,mode(teensyOutputVoltage)=4,marker(teensyOutputVoltage)=19,msize(teensyOutputVoltage)=1
+		endif 
+		doupdate;
+		Print "teensyCal_outputCal() completed level #=",i,"level=",level
+	endfor
+	
+	WAVE teensyReturn = teensyCal_writeOutputCalVal(-1,noRounding=1)		//pass an out of bounds number to break write mode	
+	vdtcloseport2 $ks_teensyCom	
+	
+	//fit line to input-output relation
+	Variable avgCol = finddimlabel(stats,1,"avg")
+	Variable levelsCol = finddimlabel(stats,1,"cmdVal")
+	Variable equivCurrentLayer = finddimlabel(stats,2,"equivCurrent")
+	Variable cmdValLayer = finddimlabel(stats,2,"cmdVal")
+	STring coefsSafeRef = statsRef +"_coefs"
+	make/o/d/n=(2) $coefsSafeRef/wave=coefs
+	curvefit/n line, kwcwave=coefs, stats[][avgCol][equivCurrentLayer]/x=stats[][levelsCol][cmdValLayer]/d //vs stats(vFitStart,vFitEnd)[%avg][%teensyReads]
+	ModifyGraph/w=$winN rgb($("fit_"+statsRef))=(1,4,52428)
+
+	Double slope = coefs[1],offset=coefs[0]
+	print "convert from current to a teensy write val with: (teensyWriteVal)=((currentVal in pA)-(offset))/(slope); (teensyWriteVal)=((currentVal in pA)-("+num2str(offset)+"))/("+num2str(slope)+")"
+
+	make/o/d/free out = {slope,offset}
+	dl_assignlblsfromlist(out,0,0,"outputCal_slope;outputCal_offset;","",0)
+	return out
+end	
+
+function/WAVE teensyCal_writeOutputCalVal(val,[noRounding])
+	int val
+	int noRounding	//pass above zero to suppress rounding
+	
+	
+	if (ParamIsDefault(noRounding) || !noRounding)
+		val = max(val,0)
+		val = min(val,4095)
+	endif
+	
+
+	make/o/d/n=(k_floatsPerStandardDataTransfer) sendWv; sendWv[0,1] = nan; sendWv[2] = 5; sendWv[3] = val; sendWv[4,] = nan;
+	int V_VDT =  teensy_sendBinary(sendWv);
+	if (!V_VDT)		//failed
+		print "teensyCal_writeOutputCalVal() failed to send command for value=",val,"aborting"
+		make/o/free/i/n=(k_floatsPerStandardDataTransfer) out = nan		//teensy cant have negative values, so this will indicate an error
+		return out
+	endif
+	WAVE returnWv = teensy_readOneFloatSetDuringExecution(untilTicks = k_teensyReturnTimeOutSecs*60,timeOutMsg="teensyCal_writeOutputCalVal() unexpectedly failed to get response")
+	print "sendWv",sendWv,"returnWv",returnWv
+	return returnWv
+end
+	
+
+function teensyCal_follow(statsRef,sinFreq,sinMin,sinMax)
 	String statsRef
 	Variable sinFreq		//sinusoid frequency in Hz
 	Double sinMin,sinMax	//minimum value of sine wave in V (-10,10 is max range; teensy is good at following -8 to 8)
 	
 	vdtoperationsport2 $ks_teensyCom;VDT2/P=$ks_teensyCom baud=k_comBaud;		//connect to teensy
-	Variable teensyInFollowMode = teensyCal_setFollowMode(dacNum,1)				//put it in follow mode, hopefully
+	Variable teensyInFollowMode = teensyCal_setFollowMode(1)				//put it in follow mode, hopefully
 	if (!teensyInFollowMode)
 		print "teensyCal_follow() teensy failed to enter follow mode, aborting"
 		return 0
@@ -1280,432 +1645,23 @@ function teensyCal_follow(dacNum,statsRef,sinFreq,sinMin,sinMax)
 	Variable ok3 = fDAQmx_ScanWait(ks_dacName)	//wait til cmdCopy and "in" have been filled
 	
 	//turn teensy off follow mode once complete
-	Variable teensyOutOfFollowMode = teensyCal_setFollowMode(dacNum,0)
+	Variable teensyOutOfFollowMode = teensyCal_setFollowMode(0)
 	
 	vdtcloseport2 $ks_teensyCom	
 	
 	setwindow $winN, hook(winHook_killWaves)=winHook_killWaves
 end
 
-//runs input-side and output-side calibration, stores calibration results for teensy GUI
-function teensyCal_doCals(statsRefStartStr,[skipCalAndForceSavingThisWv])
-	String statsRefStartStr
-	WAVE skipCalAndForceSavingThisWv
+function teensyCal_setFollowMode(on)
+	int on 		//1 for on, zero for off
 	
-	int doCal = PAramIsDefault(skipCalAndForceSavingThisWv)
-	
-	String lbl = "date="+date()+";time="+time()+";"
-	
-	String inputStatsRef=statsRefStartStr+"_input_dac0",outputStatsRef=statsRefStartStr+"_output"
-	if (doCal)
-		print "teensyCal_doCals() starting teensyCal_inputCal()"
-		WAVE inputCalWv = teensyCal_inputCal(0,inputStatsRef)		//currently running on dac0 by default, others not configured
-		print "teensyCal_doCals() starting teensyCal_outputCal() in 3 seconds..."
-		sleep/s 3
-		WAVE outputCalWv = teensyCal_outputCal(outputStatsRef)
-		concatenate/dl/np=(0)/free/o {inputCalWv,outputCalWv},calWvs_combined
-	else
-		duplicate/o/free skipCalAndForceSavingThisWv,calWvs_combined
-	endif
-
-	//store calibration data in a folder  -- may have to build folder since panel may not exist
-	String panelN = "teensy_clamp_" + ks_teensyCom
-	String folderPath = "root:Packages:"+panelN
-	NewDataFolder/o root:Packages
-	newDataFolder/o $folderPath
-	WAVE/Z calibrationWv = $(folderPath+":calibrationWv")
-	int col
-	if (!WaveExists(calibrationWv))
-		duplicate/o calWvs_combined,$(folderPath+":calibrationWv")/wave=calibrationWv
-		redimension/n=(-1,1) calibrationWv
-		col = 0
-	else
-		col = dimsize(calibrationWv,1)
-		concatenate/dl/np=(1) {calWvs_combined},calibrationWv
-	endif
-	setdimlabel 1,col,$lbl,calibrationWv
-	note calibrationWv,"inputStatsRef:"+inputStatsRef+";outputStatsRef:"+inputStatsRef+";"
+	make/o/d/n=(k_floatsPerStandardDataTransfer) sendWv; sendWv[0,1] = nan; sendWv[2] = 6;
+	sendWv[3] = on ? 1 : -1		//send 1 to set to follow, -1 to turn off
+	sendWv[4,] = nan
+	teensy_sendBinary(sendWv);	//teensy does not respond in either case
 end
 
-function/WAVE teensyCal_outputCal(statsRef)
-	STring statsRef
-	
-	STring dispWinName = statsRef + "_outputCalWin"
-	
-	Variable vMin = 0,vMax=4095
-	Variable vFitStart = 30,vFitEnd=4065
-	Variable numAdditionalLevels=14
-	
-	Variable numLevels = 2+ numAdditionalLevels		//vMin and vMax plus any additional
-	
-	vdtoperationsport2 $ks_teensyCom;VDT2/P=$ks_teensyCom baud=k_comBaud;		//connect to teensy
-	Variable inWriteMode = teensyCal_enterWriteMode()
-	if (!inWriteMode)
-		print "teensyCal_outputCal() teensy could not be put into write mode by teensyCal_enterWriteMode(); aborting"
-		make/o/free/n=0 blah
-		return blah
-	endif
-		
-	//numRows == numLevels; numCols == numWaveStats; numLayers == num statTypes "teensyOutputVoltage;scaledOutputVoltage;equivCurrent;"
-	String statTypeDescs="teensyOutputVoltage;scaledOutputVoltage;equivCurrent;"
-	int numStatTypes = itemsinlist(statTypeDescs)
-	make/o/d/n=(4)/free/W wstest; wavestats/q/w wstest;WAVE M_wavestats;Variable numStats = dimsize(M_wavestats,0)	//just find out how many rows there are in wavestats output
-	make/o/d/n=(numLevels,numStats,numStatTypes) $statsRef/wave=stats; stats = nan
-	setscale/I x,vMin,vMax,stats		//assign level scaling (and let Igor calculate intermediate levels)
-	copydimlabels/rows=1 M_wavestats,$statsRef
-	//dl_lblsToLbls("M_wavestats",0,0,inf,statsRef,1,0,"",0)		//assign wave stats labels to columns	
-	redimension/n=(-1,numStats+2,-1) stats;		//make a place to store exact cmdVal and what is reported as output just in case
-	stats = nan
-	dl_assignLblsFromList(stats,1,numStats,"cmdVal;returnedVal;","",0)
-	numStats+=2;
-	dl_assignLblsFromList(stats,2,0,statTypeDescs,"",0)		//assign layer labels -- order must stay or else update fit code below
-	
-	//make waves to store raw reads from the command and input copies going into the dac,setup reading into them
-	Variable avgPnts = k_dacAvgLenSecs * k_dacSampleRate
-	make/o/d/n=(avgPnts) teensyOutputVoltage,scaledOutputVoltage
-	setscale/p x,0,1/k_dacSampleRate,"s",teensyOutputVoltage,scaledOutputVoltage
-	Variable ok = fDAQmx_ScanStop(ks_dacName)		//assure not already scanning	
-
-	//run the test
-	int i;Double level,rangeMinV,rangeMaxV
-	make/o/free/n=(numLevels+1,10) daqErrors = nan	//error tracing
-	String winN,teensyReturn
-	for (i=0;i<numLevels;i+=1)
-		level = round(pnt2x(stats,i))		//make it an integer
-		level = max(level,0)		//keep within limits
-		level = min(level,4095)
-		stats[i][%cmdVal][] = level
-		teensyReturn = teensyCal_write2ByteVal(level)
-		stats[i][%returnedVal][] = str2num(teensyReturn)
-		doupdate;sleep/s k_waitAfterNewLevelSecs;doupdate;
-		
-		daqmx_scan/DEV=ks_dacName/AVE=(k_dacAvgNum)/STRT=0/BKG WAVES=("teensyOutputVoltage,"+num2str(k_teensyOutputCopyChanNum)+";scaledOutputVoltage,"+num2str(k_teensyScaledOutputCopyChanNum)+";")
-		daqErrors[i][1]  = fdaqmx_scanstart(ks_dacName,0)		//start dac reading in background, fills cmdCopy and inputCopy
-			//get and store dac reads
-		daqErrors[i][2]  = fDAQmx_ScanWait(ks_dacName)	//wait til cmdCopy and inputCopy have been filled
-		wavestats/q/w teensyOutputVoltage; stats[i][0,numStats-3][%teensyOutputVoltage]=M_wavestats[q]
-		wavestats/q/w scaledOutputVoltage;stats[i][0,numStats-3][%scaledOutputVoltage]=M_wavestats[q]
-		daqErrors[i][3]  = fDAQmx_ScanStop(ks_dacName)
-			//scaled stats
-		stats[i][%avg][%equivCurrent]=stats[i][%avg][%scaledOutputVoltage]*output_injected_pA_per_commanded_V
-		stats[i][%sdev][%equivCurrent]=stats[i][%sdev][%scaledOutputVoltage]*output_injected_pA_per_commanded_V
-		stats[i][%sem][%equivCurrent]=stats[i][%sem][%scaledOutputVoltage]*output_injected_pA_per_commanded_V
-		
-		//output
-		if (i==0)
-			killwindow/Z $dispWinName
-			display/k=1/N=$dispWinName stats[][%avg][%equivCurrent]/tn=equivCurrent vs stats[][%cmdVal][0]
-			winN=s_name  
-			appendtograph/w=$winN/l=L_input stats[][%avg][%teensyOutputVoltage]/tn=teensyOutputVoltage vs stats[][%cmdVal][0]
-			appendtograph/w=$winN/l=left_sdev/b=bottom_sdev stats[][%sdev][%equivCurrent]/tn=equivCurrent_sdev vs stats[][%cmdVal][0]
-			appendtograph/w=$winN/l=L_input_sdev/b=bottom_sdev stats[][%sdev][%teensyOutputVoltage]/tn=teensyOutputVoltage_sdev vs stats[][%cmdVal][0]
-			
-			errorbars/w=$winN/T=0/L=0.6/RGB=(0,0,0) equivCurrent,y,wave=(stats[][%sdev][%equivCurrent],stats[][%sdev][%equivCurrent])
-			errorbars/w=$winN/T=0/L=0.6/RGB=(0,0,0) teensyOutputVoltage,y,wave=(stats[][%sdev][%teensyOutputVoltage],stats[][%sdev][%teensyOutputVoltage])
-			modifygraph/W=$winN axisenab(bottom)={0,0.4},axisenab(bottom_sdev)={0.61,1}
-			modifygraph/w=$winN freepos=0,lblpos=52,axisenab(left)={0.55,1},axisenab(l_input)={0,0.45}
-			modifygraph/w=$winN freepos=0,lblpos=52,axisenab(left_sdev)={0.62,1},axisenab(l_input_sdev)={0,0.38},lblPos(left)=57
-			Label/w=$winN left "Scaled\routput (pA)";Label/w=$winN bottom "Teensy Cmd (0-4095)";Label/w=$winN L_input "Unscaled\rTeensy Output (V)"
-			Label/w=$winN left_sdev "SDEV (pA)\\U";Label/w=$winN bottom_sdev "Teensy Cmd (0-4095)";Label/w=$winN L_input_sdev "SDEV (mV)\\u#2";ModifyGraph/w=$winN prescaleExp(L_input_sdev)=3
-			ModifyGraph/w=$winN freePos(L_input_sdev)={0,bottom_sdev},freePos(left_sdev)={0,bottom_sdev}
-			ModifyGraph/w=$winN  mode(equivCurrent)=4,marker(equivCurrent)=19,msize(equivCurrent)=1,mode(teensyOutputVoltage)=4,marker(teensyOutputVoltage)=19,msize(teensyOutputVoltage)=1
-		endif 
-		doupdate;
-		Print "teensyCal_outputCal() completed level #=",i,"level=",level
-	endfor
-	
-	teensyReturn = teensyCal_exitWriteMode();		
-	print teensyCal_write2ByteVal(9797);		//kick the teensy out of write mode hopefully
-	vdtcloseport2 $ks_teensyCom	
-	
-	
-	//fit line to input-output relation
-	Variable avgCol = finddimlabel(stats,1,"avg")
-	Variable levelsCol = finddimlabel(stats,1,"cmdVal")
-	Variable equivCurrentLayer = finddimlabel(stats,2,"equivCurrent")
-	Variable cmdValLayer = finddimlabel(stats,2,"cmdVal")
-	STring coefsSafeRef = statsRef +"_coefs"
-	make/o/d/n=(2) $coefsSafeRef/wave=coefs
-	curvefit/n line, kwcwave=coefs, stats[][avgCol][equivCurrentLayer]/x=stats[][levelsCol][cmdValLayer]/d //vs stats(vFitStart,vFitEnd)[%avg][%teensyReads]
-	ModifyGraph/w=$winN rgb($("fit_"+statsRef))=(1,4,52428)
-
-	Double slope = coefs[1],offset=coefs[0]
-	print "convert from current to a teensy write val with: (teensyWriteVal)=((currentVal in pA)-(offset))/(slope); (teensyWriteVal)=((currentVal in pA)-("+num2str(offset)+"))/("+num2str(slope)+")"
-
-	make/o/d/free out = {slope,offset}
-	dl_assignlblsfromlist(out,0,0,"outputCal_slope;outputCal_offset;","",0)
-	return out
-end	
-
-function/wave teensyCal_inputCal(dacNum,statsRef)
-	Variable dacNum
-	String statsRef		//save results. also displays to 
-	
-	Variable input_membrane_mV_per_amplifier_V = 1000/input_amplifier_mV_per_membrane_mV		//easier to invert and convert to mV membrane potential per V amplifier change since we can read that in raw volts
-	
-	STring dispWinName = statsRef + "_inputCalWin"
-	
-	//additional parameters for calibration. Could move these to the function declaration
-	Variable vMin = -9.8,vMax=9.8		//min is -10,max is +10 
-	Variable vEnd = 0		//where to put value at end
-	Variable vFitStart=vMin,vFitEnd=vMax		//not necessarily linear throughout range, range to fit for linearity of gain
-	Variable numAdditionalLevels=14		//# linearly distributed levels to test between vMin and vMax
-	
-	Variable numLevels = 2+ numAdditionalLevels		//vMin and vMax plus any additional
-	
-	vdtoperationsport2 $ks_teensyCom;VDT2/P=$ks_teensyCom baud=k_comBaud;		//connect to teensy
-	
-	//numRows = numLevels; numCols = numWaveStats; numLayers = numStatTypes (cmdVoltage;teensyInputVoltage;equivMemVoltage;teensyReads)
-	String statTypeDescs="cmdVoltage;teensyInputVoltage;equivMemVoltage;teensyReads"
-	int numStatTypes = itemsinlist(statTypeDescs)
-	make/o/d/n=(4)/free/W wstest; wavestats/q/w wstest;WAVE M_wavestats;Variable numStats = dimsize(M_wavestats,0)	//just find out how many rows there are in wavestats output
-	make/o/d/n=(numLevels,numStats,numStatTypes) $statsRef/wave=stats; stats = nan
-	setscale/I x,vMin,vMax,stats		//assign level scaling (and let Igor calculate intermediate levels)
-	copydimlabels/rows=1 M_wavestats,$statsRef
-	//dl_lblsToLbls("M_wavestats",0,0,inf,statsRef,1,0,"",0)		//assign wave stats labels to columns	
-	dl_assignLblsFromList(stats,2,0,statTypeDescs,"",0)		//assign layer labels -- order must stay or else update fit code below
-	
-	//make waves to store raw reads from the command and input copies going into the dac,setup reading into them
-	Variable avgPnts = k_dacAvgLenSecs * k_dacSampleRate
-	make/o/d/n=(avgPnts) cmdCopy,inputCopy
-	make/o/d/n=(4) cmdWaveform		//fdaqmx_writeChan seems to be failing to complete before returning, trying to write a wave with the commanded value
-	setscale/p x,0,1/k_dacSampleRate,"s",cmdCopy,inputCopy,cmdWaveform
-	Variable ok = fDAQmx_ScanStop(ks_dacName)		//assure not already scanning
-	
-	//run the test
-	int i;Double level,rangeMinV,rangeMaxV
-	make/o/free/n=(numLevels+1,10) daqErrors = nan	//error tracing
-	String winN
-	for (i=0;i<numLevels;i+=1)
-		level = pnt2x(stats,i)
-		rangeMinV = min(level-k_cmdResolutionRange/2,-10)	//mostly a nidaq quirk that has to be dealt with, see fdaqmx_writechan
-		rangeMaxV = max(level+k_cmdResolutionRange/2,10)		//mostly a nidaq quirk that has to be dealt with, see fdaqmx_writechan
-		//daqErrors[i][0] = fdaqmx_writechan(ks_dacName,k_teensyCmdChanNum,level,rangeMinV,rangeMaxV)	//command the level as output
-		cmdWaveform = level
-		daqErrors[i][0]=fDAQmx_WaveformStop(ks_dacName)
-		DAQmx_WaveformGen/DEV=ks_dacName/NPRD=0/STRT=1 "cmdWaveform, "+num2str(k_teensyCmdChanNum)+";"	
-		doupdate;sleep/s k_waitAfterNewLevelSecs;doupdate;	//let things settle (shouldnt be strictly necessary)
-		daqmx_scan/DEV=ks_dacName/AVE=(k_dacAvgNum)/STRT=1/BKG/EOSH="print \"scan complete\""  WAVES=("cmdCopy,"+num2str(k_teensyCmdCopyChanNum)+";inputCopy,"+num2str(k_teensyInputCopyChanNum)+";")
-		//daqErrors[i][1]  = fdaqmx_scanstart(ks_dacName,0)		//start dac reading in background, fills cmdCopy and inputCopy
-			//get and store teensy reads
-		WAVE teensyReadSet = teensyCal_getReadSet(dacNum)		//get teensy reads
-		WAVESTATS/q/w teensyReadSet; stats[i][][%teensyReads]=M_wavestats[q]
-			//get and store dac reads
-		daqErrors[i][2]  = fDAQmx_ScanWait(ks_dacName)	//wait til cmdCopy and inputCopy have been filled
-			//raw read stats
-		wavestats/q/w cmdCopy; stats[i][][%cmdVoltage]=M_wavestats[q]
-		wavestats/q/w inputCopy;stats[i][][%teensyInputVoltage]=M_wavestats[q]
-			//scaled stats
-		stats[i][%avg][%equivMemVoltage]=stats[i][%avg][%cmdVoltage]*input_membrane_mV_per_amplifier_V
-		stats[i][%sdev][%equivMemVoltage]=stats[i][%sdev][%cmdVoltage]*input_membrane_mV_per_amplifier_V
-		stats[i][%sem][%equivMemVoltage]=stats[i][%sem][%cmdVoltage]*input_membrane_mV_per_amplifier_V
-		
-		//daqErrors[i][3]  = fDAQmx_ScanStop(ks_dacName)
-		
-		//output
-		if (i==0)
-			killwindow/Z $dispWinName
-			display/k=1/N=$dispWinName stats[][%avg][%teensyReads]/tn=teensyReads vs stats[][%avg][%equivMemVoltage]
-			winN=s_name
-			appendtograph/w=$winN/l=L_input stats[][%avg][%teensyInputVoltage]/tn=teensyInput vs stats[][%avg][%equivMemVoltage]
-			appendtograph/w=$winN/l=left_sdev/b=bottom_sdev2 stats[][%sdev][%teensyReads]/tn=teensyReads_sdev vs stats[][%sdev][%teensyInputVoltage]
-			appendtograph/w=$winN/l=L_input_sdev/b=bottom_sdev stats[][%sdev][%teensyInputVoltage]/tn=teensyInput_sdev vs stats[][%sdev][%equivMemVoltage]
-			errorbars/w=$winN/T=0/L=0.6/RGB=(0,0,0) teensyReads,xy,wave=(stats[][%sdev][%equivMemVoltage],stats[][%sdev][%equivMemVoltage]),wave=(stats[][%sdev][%teensyInputVoltage],stats[][%sdev][%teensyInputVoltage])		//error bars of sdev for x and y
-			errorbars/w=$winN/T=0/L=0.6/RGB=(0,0,0) teensyInput,xy,wave=(stats[][%sdev][%equivMemVoltage],stats[][%sdev][%equivMemVoltage]),wave=(stats[][%sdev][%teensyInputVoltage],stats[][%sdev][%teensyInputVoltage])		//error bars of sdev for x and y
-			modifygraph/W=$winN axisenab(bottom)={0,0.4},axisenab(bottom_sdev)={0.61,1},axisenab(bottom_sdev2)={0.61,1}
-			modifygraph/w=$winN freepos=0,lblpos=52,axisenab(left)={0.55,1},axisenab(l_input)={0,0.45}
-			modifygraph/w=$winN freepos=0,lblpos=52,axisenab(left_sdev)={0.62,1},axisenab(l_input_sdev)={0,0.38}
-			Label/w=$winN left "Teensy reads";Label/w=$winN bottom "Mem voltage";Label/w=$winN L_input "Scaled voltage"
-			Label/w=$winN left_sdev "Read SDEV (raw)";Label/w=$winN bottom_sdev "Input Mem voltage SDEV (mV)\\u#2";
-			ModifyGraph/w=$winN prescaleExp(L_input_sdev)=3,prescaleExp(bottom_sdev)=3;Label/w=$winN L_input_sdev "SDEV (mV)\\u#2";//show in mV
-			Label/w=$winN bottom_sdev2 "Scaled input SDEV \\U"
-			ModifyGraph/w=$winN freePos(L_input_sdev)={0,bottom_sdev},freePos(left_sdev)={0,bottom_sdev2},freepos(bottom_sdev2)={0,left_sdev},lblPos(bottom_sdev2)=33
-			ModifyGraph/w=$winN mode(teensyReads)=4,marker(teensyReads)=19,msize(teensyReads)=1,mode(teensyInput)=4,marker(teensyInput)=19,msize(teensyInput)=1		//dots for points
-		endif
-		doupdate;
-		Print "teensyCal_inputCal() completed level #=",i,"level=",level
-	endfor
-	
-	vdtcloseport2 $ks_teensyCom
-	
-	daqErrors[i][0] =fdaqmx_writechan(ks_dacName,k_teensyCmdChanNum,vEnd,rangeMinV,rangeMaxV)	//command the level as output -- not sure why but this isnt working
-	
-	
-	//fit line to input-output relation
-	Variable avgCol = finddimlabel(stats,1,"avg")
-	Variable equivMemVoltageLayer = finddimlabel(stats,2,"equivMemVoltage")
-	Variable teensyReadLayer = finddimlabel(stats,2,"teensyReads")
-	STring coefsSafeRef = statsRef +"_coefs"
-	make/o/d/n=(2) $coefsSafeRef/wave=coefs
-	curvefit/n line, kwcwave=coefs, stats[][avgCol][teensyReadLayer]/x=stats[][avgCol][equivMemVoltageLayer]/d //vs stats(vFitStart,vFitEnd)[%avg][%teensyReads]
-	ModifyGraph/w=$winN rgb($("fit_"+statsRef))=(1,4,52428)
-	
-	Double slope = coefs[1],offset=coefs[0]
-	print "convert from teensy reads with: (Mem voltage)=((teensyRead)-(offset))/(slope); (Mem voltage)=((teensyRead)-("+num2str(offset)+"))/("+num2str(slope)+")"
-	//use scaling to convert read SDEV into read mV sdev
-	modifygraph/w=$winN muloffset(teensyReads_sdev)={0,1/slope};Label/w=$winN left_sdev "Read SDEV (mV)\\u#2";
-	
-	make/o/d/free out = {slope,offset}
-	dl_assignlblsfromlist(out,0,0,"inputCal_slope;inputCal_offset;","",0)
-	return out
-end
-
-
-//functions to read from the teensy
-function/WAVE teensyCal_getReadSet(dacNum,[outRef])
-	Variable dacNum		//presently allows 0 or 1 for the input to A0 or A1 pins
-	String outRef	//from command line, can copy into a real wave
-	
-	Variable i
-	for (i=0;i<k_teensyReadSetsToAvg;i++)
-		WAVE/I currReads = teensyCal_getReads(dacNum)
-		if (i==0)
-			duplicate/o/free/i currReads,out
-		else
-			concatenate/np=0 {currReads},out
-		endif
-	endfor
-	
-	if ( PAramISDefault(outRef) || (strlen(outRef) < 1) )
-		return out
-	endif
-	
-	duplicate/o out,$outRef
-end
-
-function/WAVE teensyCal_getReads(dacNum)
-	Variable dacNum		//presently allows 0 or 1 for the input to A0 or A1 pins
-	
-	String cmdChar = selectstring(dacNum,"a","b")		//meaning of these for serial i/o set in loop of .ino sktch
-	VDT2/P=$ks_teensyCom killio	//delete and previous serial i/o
-	
-	VDTWrite2/O=1/Q cmdChar		//only one character commands are currntly parsed
-	if (!V_VDT)		//failed
-		print "teensyCal_getReads() failed to send command for reads"
-		make/o/free/i out = {-1}		//teensy cant have negative values, so this will indicate an error
-		return out
-	endif
-	
-	//wait for a return from the teensy over serial i/o
-	Variable startms = ticks,elapsedSecs
-	String outStr=""
-	do
-		if (teensy_bytesAvailable(ks_teensyCom) > 0)
-			vdtread2/O=1/T="\r" outStr;
-			if (V_VDT < 1)
-				print "teensyCal_getReads() failed to get reads"
-				make/o/free/i out = {-1}		//teensy cant have negative values, so this will indicate an error
-				return out
-			endif
-			VDT2/P=$ks_teensyCom killio	//delete and previous serial i/o
-			break		//succeeded, so break
-		endif
-		elapsedSecs = (ticks-startms)/60 
-	while ( elapsedSecs < k_teensyReturnTimeOutSecs)
-	
-	if (strlen(outStr) < 1)
-		make/o/free/i out={-1}		//teensy cant have negative values, so this will indicate an error
-		return out	
-	endif
-	
-	Variable outpnts = itemsinlist(outStr)
-	if (k_teensyNumReadReturns != outpnts)
-		print "teensyCal_getReads() warning, expected readNum=",k_teensyNumReadReturns,"but received",outpnts,"may need to change a constant here or in .ino sktch"
-	endif
-	make/o/i/n=(k_teensyNumReadReturns)/free out = str2num(stringfromlist(p,outStr))
-	
-	return out
-end
-	
-//assumes teensy is already connected via serial
-function teensyCal_enterWriteMode()
-	//teensy may already be in write mode, if sending back numbers
-	String teensyReturn = teensyCal_write2ByteVal(1025)		//pick a random write val
-	if (stringmatch(teensyReturn,"1025"))
-		return 1
-	endif
-	
-	String template = "*entering write mode.*"
-	VDTWrite2/O=1/Q "w"	;
-	sleep/s 1
-	String out = com_readsafe(ks_teensyCom,"\r")
-	if (stringmatch(out,template))
-		return 1
-	endif
-	VDTWrite2/O=1/Q "w"	;
-	sleep/s 1
-	out = com_readsafe(ks_teensyCom,"\r")
-	if (stringmatch(out,template))
-		return 1
-	endif
-	
-	print "teensyCal_enterWriteMode() appears to have failed to enter write mode!"
-	return 0
-end
-
-function/S teensyCal_exitWriteMode()
-	String template = "*left write mode*"
-	String out = teensyCal_write2ByteVal(9797)
-	if (stringmatch(out,template))
-		return out
-	endif	
-	return out		//probably not in write mode already. these situations could be better handled
-end
-
-function/S teensyCal_write2ByteVal(val, [noRounding])
-	Variable val //should be 0-4095 or 9797 to exit write mode
-	Variable noRounding	//pass to suppress rounding
-	
-	if (ParamIsDefault(noRounding) || !noRounding)
-		val = max(val,0)
-		val = min(val,4095)
-	endif
-	
-	Variable teensySendType = 2^4 + 2^6		//send as unsigned 16-bit integers
-	
-	vdtwritebinary2/type=(teensySendType)/o=(3)/b val
-	sleep/s 0.1
-	String teensyReturn = com_readSafe(ks_teensyCom,"\r")		//teensy will echo the commanded number if in write mode, and set DAC0 on pin A21 to command value
-	return teensyReturn
-end
-
-function teensyCal_setFollowMode(dacNum,enterFollowMode)
-	Variable dacNum
-	Variable enterFollowMode		//1 to enter, 0 to exit
-	
-	
-	vdt2 killio
-	String template = "*entering follow mode.*"
-	String out
-	
-	if (enterFollowMode)
-		String cmdStr = selectstring(dacNum,"f","g")		//f puts into write mode for dac0, g for dac1
-		VDTWrite2/O=1/Q cmdStr	;
-		sleep/s 1
-		out = com_readsafe(ks_teensyCom,"\r")
-		if (stringmatch(out,template))
-			return 1
-		endif
-		VDTWrite2/O=1/Q cmdStr;
-		sleep/s 1
-		out = com_readsafe(ks_teensyCom,"\r")
-		if (stringmatch(out,template))
-			return 1
-		endif
-		
-		print "teensyCal_enterFollowMode() appears to have failed to enter follow mode for dac",dacNum,"!"
-		return 0	
-	endif
-	
-	VDTWrite2/O=1/Q "q"	;sleep/s 1	//anything but 'f','g', and 'v' should break follow mode
-	out = com_readsafe(ks_teensyCom,"\r")
-	if (!stringmatch(out,template))
-		return 0
-	endif
-	String out1 = com_readsafe(ks_teensyCom,"\r")		//just in case of a build-up of commands, check one more
-	return stringmatch(out,template)	//return 0 if truly out of follow mode, 1 if still in
-end
-#endif
+#endif	//end #if (exists("fdaqmx_writechan")) [automated calibration]
 
 
 //HELPER FUNCTIONs
@@ -1721,46 +1677,6 @@ threadsafe function teensy_bytesAvailable(comStr)
 	vdtgetstatus2 0,0,0		//check for input on the serial buffer
 	return V_VDT
 end
-
-static constant k_vdtReadInternalTimeOutSecs=1
-static strconstant ks_defaultTermStr =  "\r"
-function/S com_readSafe(comStr,termStr,[waitForDataUntilSecs])
-	String comstr,termStr
-	Variable waitForDataUntilSecs		//optionally pass a duration over which we will wait for data and then return. If not passed or negative: if nothing is available at the time of the call to this function, "<<nothing to read>>" will be returned
-	
-	if (strlen(termStr) < 1)
-		termStr = ",\r\t"
-	endif
-	
-	//usual version, no waiting
-	if (PAramIsDefault(waitForDataUntilSecs) || (waitForDataUntilSecs<0))
-		vdtoperationsport2 $comStr
-		String out =""
-		if (teensy_bytesAvailable(comStr) > 0)
-			vdtread2/O=(k_vdtReadInternalTimeOutSecs)/T=termStr/q out;
-			return out
-		else
-			return "<<nothing to read>>"
-		endif
-		
-	//waiting version
-	else
-		Variable timeOutTicks = ticks+waitForDataUntilSecs*60	//time in ticks at which we abort
-		
-		do
-			if (!teensy_bytesAvailable(comStr)) 
-				continue		//wait for data
-			endif
-			vdtread2/O=(k_vdtReadInternalTimeOutSecs)/T=termStr/q out;
-			return out			
-	
-		while (ticks < timeOutTicks)
-		
-		return "<<nothing to read before waitForDataUntilSecs was exceeded>>"
-	
-	endif
-end
-
 
 //Active electrode compensation kernel calculation:
 //Has Teensy run noise nAvg number of times, reads each response and computes an overall kernel (electrode+membrane) for it
@@ -1900,7 +1816,7 @@ function/WAVE teensy_readDuringExecution(comStr,num)		//for use with teensy code
 		if (teensy_bytesAvailable(ks_teensyCom) < 4)	//read at least one float at a time
 			continue	//wait for data --unclear to me exactly how usb serial buffering will handle the possible overload from teensy
 		endif
-		VDTReadBinary2/B/O=(k_vdtReadInternalTimeOutSecs)/Q/TYPE=(2) respFloat	
+		VDTReadBinary2/B/O=(k_backgroundWaitTimeLimit_ticks)/Q/TYPE=(2) respFloat		
 		
 		if (dataCount == 0)
 			if (numtype(num) > 0)
@@ -1915,6 +1831,38 @@ function/WAVE teensy_readDuringExecution(comStr,num)		//for use with teensy code
 	
 	return out
 end	
+
+//meant to be extremely low level -- com port must be set higher in the call stack
+function/WAVE teensy_readOneFloatSetDuringExecution([respWv,untilTicks,timeOutMsg])
+	WAVE respWv		//pass a pre-existing wave which must be of length k_floatsPerStandardDataTransfer
+	int untilTicks		//optionally pass a set number of ticks before timeout. in this case, assumes using standard teensy comStr
+	String timeOutMsg	//for untilTicks only, optionally pass a message to print in case of time out
+	
+	if (ParamIsDefault(respWv))
+		make/o/d/n=(k_floatsPerStandardDataTransfer)/free out
+	else
+		WAVE out = respWv
+	endif
+
+	if (ParamIsDefault(untilTicks) || (numtype(untilTicks) != 0) )
+		VDTReadBinaryWave2/B/O=(k_backgroundWaitTimeLimit_ticks)/Q/TYPE=(2) out
+		return out
+	endif
+	
+	int endTicks = ticks + untilTicks
+	do
+		if (teensy_bytesAvailable("") >= (k_floatsPerStandardDataTransfer*4) )
+			VDTReadBinaryWave2/B/O=(k_backgroundWaitTimeLimit_ticks)/Q/TYPE=(2) out
+			return out			
+		endif
+	while (ticks <= endTicks) 
+	
+	out = nan		//indicate failure with all nans
+	if (!paramIsDefault(timeOutMsg))
+		print timeOutMsg
+	endif
+	return out		
+end
 
 
 static constant k_aec_ignorePnts = 0  //how many points to set to zero at the beginning of the filter wave -- 1 is recommended. zero doesnt change much, but it's unclear how to use that instantaneous point for active electrode compenation
@@ -2127,7 +2075,7 @@ function teensy_gui_sendElectrodeKernel(panelN,ignoreMicros,[forceConstantKernel
 	endif
 	
 	print "aec_lastKernelSendWv len",sentWvLenP,"wv=",aec_lastKernelSendWv
-	//note that the wave does not need to be of length that is multiple of 16, any extras are sent as NaN from teensy_gui_sendFloats 
+	//note that the wave does not need to be of length that is multiple of k_floatsPerStandardDataTransfer (16), any extras are sent as NaN from teensy_gui_sendFloats 
 	teensy_gui_sendFloats(panelN,"aec_lastKernelSendWv",0,0)
 	
 	teensy_gui_sendSettings(panelN,1)		//I dont know why, but sending a settings update helps if the user is going to run this twice in a row

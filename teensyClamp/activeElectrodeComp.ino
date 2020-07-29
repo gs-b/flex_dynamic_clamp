@@ -44,8 +44,9 @@ void updateElectrodeKernel() {
 int histPos; unsigned int totalDt;
 FASTRUN float getAecSub() {
   aec.lastConvolutionResult = 0.0;
-  
-  if (!aec.electrodeKernelReceived || !sp.historyWrapped) { //only return non-zero if electrode kernel has been received
+
+  //only return non-zero if AEC checkbox is on in GUI (cp.aec represents here), if electrode kernel has been received, and if history position has wrapped (almost always true -- maybe should drop for speed)
+  if (!cp.aec || !aec.electrodeKernelReceived || !sp.historyWrapped) {
     return aec.lastConvolutionResult;                        //and if the history buffer has filled once (it definitely will have by the time an electrode kernel is computed)
   }
   
