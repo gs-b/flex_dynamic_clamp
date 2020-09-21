@@ -193,11 +193,13 @@ function startGUI(comStr)
 	
 	currTop = (cbHeight + cbVertSpacing)*cbRows
 	
-	//add I(V) relation popup menu
-	Button sendIvRel win=$panelN,pos={currLeft,currTop},size={cbWidth,cbHeight},fsize=fontSize,proc=teensy_gui_btnHandling,title="Send I(V)",help={"Send I(V) relation in red below for use arbitrary clamp I(V)"}
+	//add calibration popup menu and I(V) relation popup menu
+	currtop += 1
+	Button autoCalibrate win=$panelN,pos={currLeft,currTop},size={cbWidth/2-4,cbHeight+2},fsize=fontSize,proc=teensy_gui_btnHandling,title="Calibrate",help={"Automatic Teensy Calibration"}
+	Button sendIvRel win=$panelN,pos={currLeft+cbWidth/2-3,currTop},size={cbWidth/2-4,cbHeight+2},fsize=fontSize,proc=teensy_gui_btnHandling,title="Send I(V)",help={"Send I(V) relation in red below for use arbitrary clamp I(V)"}
 	
 	//add I(V) graph
-	currtop+=20
+	currtop+=19
 	graphN=panelN+"_ivDisp"
 	display/host=$panelN/w=(currLeft,currTop,currLeft+cbWidth,currTop+cbWidth*0.8)/n=$graphN ivRel_lastSent/tn=lastSent,ivRel_toSend/tn=toSend,leakRel/tn=leakRel,totalRel/tn=totalRel
 	modifygraph/w=$(panelN+"#"+graphN) rgb(lastSent)=(0,0,0),lsize(lastSent)=2
@@ -752,19 +754,32 @@ end
 	
 function teensy_gui_btnHandling(s) : ButtonControl
 	STRUCT WMButtonAction &s
+	
+	if (s.eventCode != 2)	//only respond to mouse up (while still over button) after click down on button
+		return 0
+	endif
+	
 
 	strswitch (s.ctrlName)
 		case "sendIvRel":
-			if (s.eventCode == 2)	//only respond to mouse up (while still over button) after click down on button
-				variable sendIv = 1
-				prompt sendIv,"Send I(V) relation (red trace) to Teensy? WARNING: SLOWS ANY ONGOING ARBITRARY CLAMP"
-				doprompt "Really send I(V) despite slowing? (1 for yes, 0 for no)",sendIv
-				if (!V_flag && sendIV)
-					//teensy_sendIvRel(s.win)
-					teensy_gui_sendFloats(s.win,"ivRel_toSend",0,1)		//send iv rel
-				endif
+			variable sendIv = 1
+			prompt sendIv,"Send I(V) relation (red trace) to Teensy? WARNING: SLOWS ANY ONGOING ARBITRARY CLAMP"
+			doprompt "Really send I(V) despite slowing? (1 for yes, 0 for no)",sendIv
+			if (!V_flag && sendIV)
+				teensy_gui_sendFloats(s.win,"ivRel_toSend",0,1)		//send iv rel
 			endif
-		break
+		
+			break
+		
+		case "autoCalibrate":
+			Variable runCalibration = 1
+			prompt runCalibration, "Auto calibrate Teensy? (1 for yes, 0 for no). WARNING: REQUIRES IGOR NIDAQ BOARD CONTROL TEENSY MEMBRANE READ INPUT, NOT AMPLIFIER!"
+			doprompt "Run autocalibration?",runCalibration
+			if (!V_flag && runCalibration)
+				teensyCal_doCals("",portIsConnected=1)
+			endif 
+			
+			break
 		
 	endswitch
 end
@@ -1232,21 +1247,27 @@ static constant k_dacAvgLenSecs = 0.2	//2 //number of seconds to average
 
 
 //runs input-side and output-side calibration, stores calibration results for teensy GUI to send to teensy upon start / continue
-function teensyCal_doCals(statsRefStartStr,[skipCalAndForceSavingThisWv])
-	String statsRefStartStr
+function teensyCal_doCals(statsRefStartStr,[skipCalAndForceSavingThisWv,portIsConnected])
+	String statsRefStartStr			//pass "" for default name, which is date specific
 	WAVE skipCalAndForceSavingThisWv
+	int portIsConnected		//pass 1 if port is connected. Will keep it so. Otherwise pass 0, in which case automatically connects to ks_teensyCom and disconnects after
 	
 	int doCal = PAramIsDefault(skipCalAndForceSavingThisWv)
+	portIsConnected = paramisdefault(portIsConnected) ? 0 : portIsConnected
 	
 	String lbl = "date="+date()+";time="+time()+";"
+	
+	if (strlen(statsRefStartStr) < 1)
+		statsRefStartStr = "TeensyCal_" + getDateStr("")
+	endif
 	
 	String inputStatsRef=statsRefStartStr+"_input_dac0",outputStatsRef=statsRefStartStr+"_output"
 	if (doCal)
 		print "teensyCal_doCals() starting teensyCal_inputCal()"
-		WAVE inputCalWv = teensyCal_inputCal(inputStatsRef)		//currently running on dac0 by default, others not configured
+		WAVE inputCalWv = teensyCal_inputCal(inputStatsRef,portIsConnected)		//currently running on dac0 by default, others not configured
 		print "teensyCal_doCals() starting teensyCal_outputCal() in 3 seconds..."
 		sleep/s 1
-		WAVE outputCalWv = teensyCal_outputCal(outputStatsRef)
+		WAVE outputCalWv = teensyCal_outputCal(outputStatsRef,portIsConnected)
 		concatenate/dl/np=(0)/free/o {inputCalWv,outputCalWv},calWvs_combined
 	else
 		duplicate/o/free skipCalAndForceSavingThisWv,calWvs_combined
@@ -1271,8 +1292,9 @@ function teensyCal_doCals(statsRefStartStr,[skipCalAndForceSavingThisWv])
 	note calibrationWv,"inputStatsRef:"+inputStatsRef+";outputStatsRef:"+inputStatsRef+";"
 end
 
-function/wave teensyCal_inputCal(statsRef)
+function/wave teensyCal_inputCal(statsRef,portIsConnected)
 	String statsRef		//save results. also displays to 
+	int portIsConnected
 	
 	Variable input_membrane_mV_per_amplifier_V = 1000/input_amplifier_mV_per_membrane_mV		//easier to invert and convert to mV membrane potential per V amplifier change since we can read that in raw volts
 	
@@ -1287,7 +1309,10 @@ function/wave teensyCal_inputCal(statsRef)
 	Variable numLevels = 2+ numAdditionalLevels		//vMin and vMax plus any additional
 	
 	//connect to teensy and ensure that it is not in running mode
-	vdtoperationsport2 $ks_teensyCom;VDT2/P=$ks_teensyCom baud=k_comBaud;
+	if (!portIsConnected)
+		vdtoperationsport2 $ks_teensyCom;VDT2/P=$ks_teensyCom baud=k_comBaud;
+	endif
+	
 	int off = teensyCal_setRunningModeOffDuringExecution()
 	if (!off)
 		print "teensyCal_inputCal() failed to set teensy running mode to off! calibration may fail / look like a flat relationship. May need to reload sketch onto teensy"
@@ -1358,7 +1383,9 @@ function/wave teensyCal_inputCal(statsRef)
 		doupdate;Print "teensyCal_inputCal() completed level #=",i,"level=",level
 	endfor
 	
-	vdtcloseport2 $ks_teensyCom
+	if (!portIsConnected)
+		vdtcloseport2 $ks_teensyCom
+	endif
 	
 	daqErrors[i][0] =fdaqmx_writechan(ks_dacName,k_teensyCmdChanNum,vEnd,rangeMinV,rangeMaxV)	//command the level as output -- not sure why but this isnt working
 	
@@ -1440,8 +1467,9 @@ function teensyCal_setRunningModeOffDuringExecution()
 end
 
 
-function/WAVE teensyCal_outputCal(statsRef)
+function/WAVE teensyCal_outputCal(statsRef,portIsConnected)
 	STring statsRef
+	int portIsConnected
 	
 	STring dispWinName = statsRef + "_outputCalWin"
 	
@@ -1451,7 +1479,10 @@ function/WAVE teensyCal_outputCal(statsRef)
 	
 	Variable numLevels = 2+ numAdditionalLevels		//vMin and vMax plus any additional
 	
-	vdtoperationsport2 $ks_teensyCom;VDT2/P=$ks_teensyCom baud=k_comBaud;		//connect to teensy
+	if (!portIsConnected)
+		vdtoperationsport2 $ks_teensyCom;VDT2/P=$ks_teensyCom baud=k_comBaud;		//connect to teensy
+	endif
+	
 	int off = teensyCal_setRunningModeOffDuringExecution()
 	if (!off)
 		print "teensyCal_inputCal() failed to set teensy running mode to off! calibration may fail / look like a flat relationship. May need to reload sketch onto teensy"
@@ -1526,7 +1557,10 @@ function/WAVE teensyCal_outputCal(statsRef)
 	endfor
 	
 	WAVE teensyReturn = teensyCal_writeOutputCalVal(-1,noRounding=1)		//pass an out of bounds number to break write mode	
-	vdtcloseport2 $ks_teensyCom	
+	
+	if (!portIsConnected)
+		vdtcloseport2 $ks_teensyCom	
+	endif
 	
 	//fit line to input-output relation
 	Variable avgCol = finddimlabel(stats,1,"avg")
@@ -2188,4 +2222,20 @@ static function disp_arrayAxes(winN,axMatchStr,spaceFrac,orderedList,[rev])
 		currStart=indForCalc*fillPerAx+indForCalc*spaceFrac
 		modifygraph/w=$winN axisenab($ax)={currStart,currStart+fillPerAx}
 	endfor
+end
+
+function/S getDateStr(igorDate)
+	String igorDate	//pass "" for current (computer) date, pass another date otherwise. Format must be as returned by date()
+	
+	if (strlen(igorDate) < 1)
+		igorDate = date()
+	endif
+	
+	String monthsList = "jan;feb;mar;apr;may;jun;jul;aug;sep;oct;nov;dec;"
+	make/o/t/n=(12) monthsStrs = selectstring(p < 9, "", "0") + num2str(p+1)
+	String expr="([[:alpha:]]+), ([[:alpha:]]+) ([[:digit:]]+), ([[:digit:]]+)"
+	String dayOfWeek, monthName, dayNumStr, yearStr
+	SplitString/E=(expr) igorDate, dayOfWeek, monthName, dayNumStr, yearStr
+	return yearStr[2,inf] + monthsStrs[whichlistitem(monthName,monthsList,";",0,0)] + dayNumStr
+	
 end
