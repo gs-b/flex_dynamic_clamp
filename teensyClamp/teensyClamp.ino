@@ -204,7 +204,7 @@ FASTRUN void calcTargetCurrent() {  //sets sp.lastTotalCurrent for new target cu
 
   //arbitrary-clamp component
   if (cp.dynamicClampingArbitraryInput) {
-    sp.lastArbitraryCurrent_raw = -cp.ivVals[sp.lastVmPinReading]; //+500 good for diagnostic testing   //flipped for whole-cell w/ inward current depolarizing
+    sp.lastArbitraryCurrent_raw = cp.ivVals[sp.lastVmPinReading]; //removed negative sign
     sp.lastArbitraryCurrent_scaled = sp.lastArbitraryCurrent_raw * getConductanceMultiplier(); //ivVals are pre-scaled to a value from 0 - 4095 during calibration
   } else {
     sp.lastArbitraryCurrent_raw = 0;
