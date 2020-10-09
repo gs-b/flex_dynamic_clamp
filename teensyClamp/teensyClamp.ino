@@ -51,10 +51,13 @@ struct controlParameters {    //name of struct type
   float leak_mV;      //reversal potential of the leak conductance? (leak_mV slider in Igor). leak current is simply = (Vmem - leak_mV)*leak_nS (has units of pA like output-side calibration)
   float junctionPotential;   //set a junction potential: Value is ADDED to the voltage reading to give the true voltage, so it's usually negative in whole cell.
                              //note that this is very slightly inefficient for computation, could pre-bake this into i(v) relation and leak offset 
+  int arbitraryIvOffsetDueToJP;    //junction potential will slide position in arbitrary I(V).
+  
   
   //I(V) relation for arbitrary clamp conductance. Started by sending fully-real-values Serial I/O for lastDataTransfer. Then multiple rounds are read
   float ivVals[numVmVals];
-
+  float ivMultiplier; //multiplies i(v)
+  
 } cp; //name of struct instance                             
 
 //A structure to hold STATE PARAMETERS. These are not directly set from Serial, they are used in calculation from moment to moment or reflect moment to moment behavior
@@ -189,10 +192,11 @@ FASTRUN void clampStep() {
   updateCurrentHistory();//store current command and, if running AEC, update pipette response
 }
 
+int ivPos; //just going to keep this pre-declared as global
 FASTRUN void calcTargetCurrent() {  //sets sp.lastTotalCurrent for new target current based on vm and conductances. Reads vm, calculates current from cond relation
   //read and calculate vm
   sp.lastVmPinReading = adc->adc0->analogReadContinuous();
-  sp.lastVm = getVmFrom12bitReading(sp.lastVmPinReading) - getAecSub();
+  sp.lastVm = getVmFrom12bitReading(sp.lastVmPinReading,false) - getAecSub();
     //note: updateCurrentHistory() is called in clamp() for a better reflection of the total dt step time
   
   //leak component
@@ -204,8 +208,12 @@ FASTRUN void calcTargetCurrent() {  //sets sp.lastTotalCurrent for new target cu
 
   //arbitrary-clamp component
   if (cp.dynamicClampingArbitraryInput) {
-    sp.lastArbitraryCurrent_raw = cp.ivVals[sp.lastVmPinReading]; //removed negative sign
-    sp.lastArbitraryCurrent_scaled = sp.lastArbitraryCurrent_raw * getConductanceMultiplier(); //ivVals are pre-scaled to a value from 0 - 4095 during calibration
+    ivPos = (unsigned int)(sp.lastVmPinReading + cp.arbitraryIvOffsetDueToJP);
+    if (ivPos > 4095) {
+      ivPos = 4095;   //constrain to 0-4095 (is 0 or greater because unsigned
+    }
+    sp.lastArbitraryCurrent_raw = cp.ivVals[ivPos]; //removed negative sign
+    sp.lastArbitraryCurrent_scaled = sp.lastArbitraryCurrent_raw * getConductanceMultiplier() * cp.ivMultiplier; //ivVals are pre-scaled to a value from 0 - 4095 during calibration
   } else {
     sp.lastArbitraryCurrent_raw = 0;
     sp.lastArbitraryCurrent_scaled = 0;
@@ -221,9 +229,20 @@ FASTRUN int get12bitCmdForCurrent(float current) {   //current in pA, from outpu
 
 //  convert from teensy reads with: (Mem voltage)=((teensyRead)-(offset))/(slope); (Mem voltage)=((teensyRead)-(2452.6))/(7.8236)
 //  then ADD the usually negative junction potential to get the actual membrane voltage
-FASTRUN float getVmFrom12bitReading(int vmPinReading) {   //vm in mV
-  return  ( ( ((float)vmPinReading) - cp.input_offset ) / cp.input_slope ) + cp.junctionPotential;
+FASTRUN float getVmFrom12bitReading(int vmPinReading, bool ignoreJunctionPotential) {   //vm in mV
+
+  float result = ( ((float)vmPinReading) - cp.input_offset ) / cp.input_slope;
+
+  if (!ignoreJunctionPotential) {
+    result += cp.junctionPotential;
+  }
+
+  return result;
 } 
+
+FASTRUN float get12BitReadingChangeForVmChange(float deltaVm) {
+  return deltaVm * cp.input_slope;
+}
 
 //currently set to anticipate modulation from 0V to 3.1025V  //0.3 to 2.8V for a 2.5V range. Above 3.3V will damage teensy! 2.5V range is nice because becomes 0-1 by multiplying by 0.4
 const int minForCondSize = 0;//372;    //what range from 0 to 4095 for minimumal activation of conductance (zero point, below this also get zero). 372 is ~0.3V
@@ -260,7 +279,7 @@ void initStateParams() {    //state params initialization + first vm measurement
   memset(sp.currentCmds,0,sizeof(sp.currentCmds));  //initialize currentCmds to zero
   memset(sp.dts,0,sizeof(sp.dts));
   sp.historyPos = -1;             //tracks current position in these arrays so they act like circular buffers
-  sp.historyWrapped = 0;        //tracks whether history buffer has wrapped around at least once, meaning AEC has (more than) enough data to work with
+  sp.historyWrapped = false;        //tracks whether history buffer has wrapped around at least once, meaning AEC has (more than) enough data to work with
   rs_init();                    //get ready to track dt mean and variance (in stats.ino)
   
   //start reading and write 0 current output  
@@ -281,9 +300,12 @@ FASTRUN void updateState() {
   cp.leak_nS = cp.lastDataTransfer[6];
   cp.leak_mV = cp.lastDataTransfer[7];
   cp.junctionPotential = cp.lastDataTransfer[8];
+  cp.ivMultiplier = cp.lastDataTransfer[9];
   //position 0 MUST be nan and position 5 MUST be real, currently. This and other positions could be used
   //with the potential need for modifications to loop() and updateCalibration() 
-  //positions 8-15 are expected to be nan and can be used to send additional parameters
+  //positions 10-15 are expected to be nan and can be used to send additional parameters
+
+  cp.arbitraryIvOffsetDueToJP = (int)round(get12BitReadingChangeForVmChange(cp.junctionPotential)); //imperfect, but better than noting. Could interpolate in future
 }
 
 FASTRUN void updateCalibration() {

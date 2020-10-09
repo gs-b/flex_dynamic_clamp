@@ -3,6 +3,8 @@
 #pragma IndependentModule = TeensyClamp // independent module, continues running even if code outside the module is uncompiled
 
 
+//MAJOR TO DO: SINGLE SCALE FACTOR FOR I(V) RELATION SO WE CAN CHANGE SCALE OF STIMULI ONLINE WITHOUT SENDING A NEW I(V)
+
 //Teensy dynamic clamp
 //requires Igor NIDAX tools mx and #include procs associated with it (to apply voltage commands and read voltage output)
 //requires VDT2 (to tell the teensy what to do)
@@ -169,18 +171,23 @@ function startGUI(comStr)
 	Label/W=$(panelN+"#"+graphN) right,"pA\\u#2"
 	setaxis/A=2 left; setaxis/A=2 right;
 	
-	//add checkboes
+	//add checkboes, then one setvar for I(V) multiplier
 	num = itemsinlist(checkboxes)
 	int currRow,currCol
 	Variable cbLeft,cbCols = floor((num-1)/cbRows) + 1
 	print "cbCols",cbCols
 	currLeft = sliderWidth + sliderRightSpacing
 	setwindow $panelN,userdata(cbsToSend)=""		//tracks what cbs will be sent to teensy, filled in in loop below
-	for (i=0;i<num;i++)
+	
+	variable endnum = num+1
+	for (i=0;i<endnum;i++)		//currently 5, want to calculate position for a 6th item, the setvar
 		currRow = mod(i,cbRows)
 		currCol = floor(i/cbRows)
 		currTop = (cbHeight + cbVertSpacing)*currRow
 		cbLeft = currLeft + currCol*cbWidth/cbCols
+		if (i >=num)
+			break
+		endif
 		name = stringfromlist(i,checkboxes)
 		help = stringfromlist(i,cbHelpStrs)
 		if (stringmatch(stringfromlist(i,includeCbInSettings),"1"))
@@ -190,6 +197,12 @@ function startGUI(comStr)
 		Checkbox $name win=$panelN,pos={cbLeft,currTop},size={cbWidth/cbCols,cbHeight},fsize=fontSize,proc=teensy_gui_cbHandling,title=stringfromlist(i,cbTitles),help={stringfromlist(i,cbHelpStrs)}
 		
 	endfor
+	
+	//add the set var in last cb position -- this setvar doesnt get handled like others bc no associated slider
+	String ivMultSetVarName = "ivMultiplierSetVar_"+panelN
+	setvariable $ivMultSetVarName  win=$panelN,pos={cbLeft,currTop},size={cbWidth/cbCols,cbHeight},fsize=fontSize,proc=teensy_gui_svHandling 
+	setvariable $ivMultSetVarName value=_NUM:1,title="I(V)*=",help={"Multiply I(V) relation by value -- 1.0 for no multiplier. NOTE: NOT REFLECTED IN DISPLAY!!!"}
+	setwindow $panelN,userdata(svsToSend)+=ivMultSetVarName+";"
 	
 	currTop = (cbHeight + cbVertSpacing)*cbRows
 	
@@ -340,6 +353,11 @@ function teensy_gui_svHandling(s) : SetVariableControl
 			else
 				teensy_gui_setConnection(s.win,closeOpenOrCheck)
 			endif
+		endif
+	
+	elseif (stringmatch(s.ctrlname,"ivMultiplierSetVar_"+s.win))
+		if (s.eventCode == 1) 		//mouse up
+			teensy_gui_sendSettings(s.win,0)		//just send settings if in live mode
 		endif
 	endif
 end
@@ -508,8 +526,9 @@ function/WAVE teensy_gui_getSettingsWv(panelN)
 	//5: dc current (pA)
 	//6: leak condutance (nS)
 	//7: leak reversal potential (mV)
-	//8: junction potential
-	//9-15: NaN (available for additional parameters)
+	//8: junction potential (mV)
+	//9: iv multiplier (unitless)
+	//10-15: NaN (available for additional parameters)
 
 	return settingsWv
 end
