@@ -213,7 +213,7 @@ FASTRUN void calcTargetCurrent() {  //sets sp.lastTotalCurrent for new target cu
       ivPos = 4095;   //constrain to 0-4095 (is 0 or greater because unsigned
     }
     sp.lastArbitraryCurrent_raw = cp.ivVals[ivPos]; //removed negative sign
-    sp.lastArbitraryCurrent_scaled = sp.lastArbitraryCurrent_raw * getConductanceMultiplier() * cp.ivMultiplier; //ivVals are pre-scaled to a value from 0 - 4095 during calibration
+    sp.lastArbitraryCurrent_scaled = -sp.lastArbitraryCurrent_raw * getConductanceMultiplier() * cp.ivMultiplier; //ivVals are pre-scaled to a value from 0 - 4095 during calibration
   } else {
     sp.lastArbitraryCurrent_raw = 0;
     sp.lastArbitraryCurrent_scaled = 0;
