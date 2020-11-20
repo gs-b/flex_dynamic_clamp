@@ -795,7 +795,11 @@ function teensy_gui_btnHandling(s) : ButtonControl
 			prompt runCalibration, "Auto calibrate Teensy? (1 for yes, 0 for no). WARNING: REQUIRES IGOR NIDAQ BOARD CONTROL TEENSY MEMBRANE READ INPUT, NOT AMPLIFIER!"
 			doprompt "Run autocalibration?",runCalibration
 			if (!V_flag && runCalibration)
+			#if (exists("fdaqmx_writechan"))		//only compile of daq procs are available via the xop	
 				teensyCal_doCals("",portIsConnected=1)
+			#else
+				print "Cannot autocalibrate without Igor DAQMX tools (fdaqmx)"
+			#endif	
 			endif 
 			
 			break
