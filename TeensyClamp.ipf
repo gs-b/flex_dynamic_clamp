@@ -1,17 +1,14 @@
 ﻿#pragma TextEncoding = "UTF-8"
 #pragma rtGlobals=3		// Use modern global access method and strict wave access.
 #pragma IndependentModule = TeensyClamp // independent module, continues running even if code outside the module is uncompiled
+#include <NIDAQmxWaveScanProcs>				//Igor NIDAQ Tools MX required procedures
+#include <NIDAQmxWaveFormGenProcs>
 
+//---Teensy dynamic clamp--- see https://github.com/gs-b/flex_dynamic_clamp
 
-//MAJOR TO DO: SINGLE SCALE FACTOR FOR I(V) RELATION SO WE CAN CHANGE SCALE OF STIMULI ONLINE WITHOUT SENDING A NEW I(V)
-
-//Teensy dynamic clamp
-//requires Igor NIDAX tools mx and #include procs associated with it (to apply voltage commands and read voltage output)
+//requires Igor NIDAX tools mx and #include procs associated with it (to apply voltage commands and read voltage output) (Uses Scan Control & Waveform Generator)
 //requires VDT2 (to tell the teensy what to do)
-//The CALIBRATION sketch testExternalCond3.ino must be loaded onto the Teensy during calibration
-//The DYNAMIC CLAMP sketch is teensyDynamicClamp.ino and must be loaded onto the Teensy the rest of the time
-
-//Igor NIDAQ XOPs required: Scan Control; Waveform Generator;
+//The sketch TeensyClamp.ino must be loaded onto the Teensy
 
 //the following connections must be made from the Teensy to the scaling circuitry and NIDAQ board:
 //(TODO enter these)
@@ -23,52 +20,50 @@
 //command Teensy to output 0-3.3V, record teensy output, scaled output, fit these to get output-relation (stored in the Package folder)
 
 
-//KNOWN ISSUES:
-//FOR CLAMP:
-//
-//FOR CALIBRATION:
-//If calibration is run with GUI active and running checkbox checked, user may have to send an update to teensy to start run again.
-//would like to automate this in future
-
-//DESIGN GOALS
-//1. All extended-time tasks (waiting for teensy to respond and send back information) occur in background 
-//2. No global waves/variables/strings. So far, the only exception is the I(V) relation wave and the calibration data wave. These are stored in a folder specific to the GUI panel, in the Packages 
-//3. Small GUI footprint on screen
-//4. No interruption of teensy clamp function unless the user really wants to do it
-
 //use may need to modify:
-static strconstant ks_dacName = "dac0"
-strconstant ks_teensyCom = "COM21"
+static strconstant ks_dacName = "dac0"																//name of DAC is Igor NIDAQ tools
+strconstant ks_teensyCom = "COM21"																		//this is a default that can be changed so that you don't have to enter the port name each time. User is prompted un start up
 static strconstant ks_internalSolutions = "Kmes;CsCl;D-Mann;NMDG-Asp;TEA-Phos;"		//optionally list junction potentials in order to set them easily in the GUI (they can also be entered manually)
-static strconstant ks_junctionPotentialPresets = "-8.43;-4.43;-7.43;-3.74;-5.71;"		//the junction potential associated with
+static strconstant ks_junctionPotentialPresets = "-8.43;-4.43;-7.43;-3.74;-5.71;"	//the junction potential associated with
 
 //user may also need to modify, and these must also match on the teensy
-constant input_amplifier_mV_per_membrane_mV = 50		// scale factor for amplifier mV per membrane mV (listed in parenthesis after Primary Output in multiclamp commander I-clamp tabs. For gain of 5 on 700B, it's 50 mV/mV
-//NOTE: input_membrane_mV_per_amplifier_V = 1000/input_amplifier_mV_per_membrane_mV		//easier to invert and convert to mV membrane potential per V amplifier change since we can read that in raw volts
-constant output_injected_pA_per_commanded_V	= 400	//scale factor for current injected in pA per volt to amplifier (in multiclamp commander under options (F10), gains tab, external command sensitivity)
+constant input_amplifier_mV_per_membrane_mV = 50				// scale factor for amplifier mV per membrane mV (listed in parenthesis after Primary Output in multiclamp commander I-clamp tabs. For gain of 5 on 700B, it's 50 mV/mV
+																				//NOTE: input_membrane_mV_per_amplifier_V = 1000/input_amplifier_mV_per_membrane_mV		//easier to invert and convert to mV membrane potential per V amplifier change since we can read that in raw volts
+constant output_injected_pA_per_commanded_V	= 400			//scale factor for current injected in pA per volt to amplifier (in multiclamp commander under options (F10), gains tab, external command sensitivity)
 
 //input-side pins
-static constant k_teensyCmdChanNum = 0 //on NIDAQ, # of analog in pin (as in AI#). I use analog out (AO) 0, which has chanNum = 0
+static constant k_teensyCmdChanNum = 0 				//on NIDAQ, # of analog in pin (as in AI#). I use analog out (AO) 0, which has chanNum = 0
 static constant k_teensyCmdCopyChanNum	= 0		//copy of command is recorded by what analog in (AI) pin
 static constant k_teensyInputCopyChanNum = 1		//copy of scaled input to teensy is recorded by what analog in (AI) pin
 
 //output-side pins
-static constant k_teensyOutputCopyChanNum = 2		//copy of teensy DAC output (unscaled, 0-3.3V range)
-static constant k_teensyScaledOutputCopyChanNum = 3 //scaled teensy output (scaled, +/-10V range)
+static constant k_teensyOutputCopyChanNum = 2				//copy of teensy DAC output (unscaled, 0-3.3V range)
+static constant k_teensyScaledOutputCopyChanNum = 3 	//scaled teensy output (scaled, +/-10V range)
 
 //user will not need to modify, but might want to
 constant k_comBaud = 115200
-static constant k_byteLimit = 64 //empirical testing shows that only 64 bytes (16 32-bit float-point values) can be sent over the serial I/O at a time
+static constant k_byteLimit = 64 								//empirical testing shows that only 64 bytes (16 32-bit float-point values) can be sent over the serial I/O at a time
 static constant k_floatsPerStandardDataTransfer = 16	//should match in ino sketch.. GUI will update teensy by sending this many floats, where the order specifies what is what. Assumed to be maximum sendable
-static constant k_teensyStateBufferSize = 10000		//wave will store this number of samples of teensy responses, including cell Vm, comand,etc. k_numStatusPoints sets how many items are stored here (wave is rows k_teensyStateBufferSize cols k_numStatusPoints)
+static constant k_teensyStateBufferSize = 10000			//wave will store this number of samples of teensy responses, including cell Vm, comand,etc. k_numStatusPoints sets how many items are stored here (wave is rows k_teensyStateBufferSize cols k_numStatusPoints)
+
+//---with luck, users will never have to touch the code below this point!---
+
+//This defines a menu item and hotkey to start a TeensyClamp GUI
+Menu "Macros"
+	"Start TeensyClamp GUI/1",startGUI("")
+end
+
 
 //Function called to start a new GUI to a control a teensy (in future: add macro with hotkey)
 //functions here continue to take a comStr argument instead of using ks_teensyCom in case of multiple teensy devices (not tested)
 function startGUI(comStr)
 	String comStr		//allows multiple windows for multiple teensy clamps, though one is generally anticipated and has been tested
 	
-	if (strlen(comStr) < 1)
+	if (strlen(comStr) < 1) //let user choose default or other through a dialog
 		comStr = ks_teensyCom
+		prompt comStr,"Specify Com Port for Teensy Dynamic Clamp"
+		String helpStr = "The Teensy must be accessible to Igor as a Serial Port. To find available ports, run \"VDTGetPortList2;print s_vdt\. The default port, "+ks_teensyCom+", can be changed in TeensyClamp.ipf"
+		doprompt/help=helpStr "Teensy Com Port?", comStr
 	endif
 	
 	//panel specifications  -- first name panel and create Packages folder if it doesnt exist (same folder is used by teensyCal_inputCal() and teensyCal_outputcal() to store calibration data
@@ -175,7 +170,6 @@ function startGUI(comStr)
 	num = itemsinlist(checkboxes)
 	int currRow,currCol
 	Variable cbLeft,cbCols = floor((num-1)/cbRows) + 1
-	print "cbCols",cbCols
 	currLeft = sliderWidth + sliderRightSpacing
 	setwindow $panelN,userdata(cbsToSend)=""		//tracks what cbs will be sent to teensy, filled in in loop below
 	
@@ -794,9 +788,10 @@ function teensy_gui_btnHandling(s) : ButtonControl
 			Variable runCalibration = 1
 			prompt runCalibration, "Auto calibrate Teensy? (1 for yes, 0 for no). WARNING: REQUIRES IGOR NIDAQ BOARD CONTROL TEENSY MEMBRANE READ INPUT, NOT AMPLIFIER!"
 			doprompt "Run autocalibration?",runCalibration
+			String comStr = getuserdata(s.win,"","comStr")
 			if (!V_flag && runCalibration)
 			#if (exists("fdaqmx_writechan"))		//only compile of daq procs are available via the xop	
-				teensyCal_doCals("",portIsConnected=1)
+				teensyCal_doCals(comStr,"",portIsConnected=1)
 			#else
 				print "Cannot autocalibrate without Igor DAQMX tools (fdaqmx)"
 			#endif	
@@ -1166,7 +1161,6 @@ function teensy_gui_sendCalibration(panelN,bypassNonLiveMode)
 		redimension/n=(k_floatsPerStandardDataTransfer) calTemp
 		teensy_gui_postMessage(panelN,"teensy_gui_sendCalibration() calibrationWv unexpected very long, longer than k_floatsPerStandardDataTransfer, but 4 points expeted! whats going on??!! Teensy may be innacurate. Run teensyCal_doCals() after switching to NIDAQ control",1)
 	endif
-	print "calTemp len",dimsize(calTemp,0),"wv",calTemp
 	teensy_gui_sendSettings(panelN,bypassNonLiveMode,customSettingsWv=calTemp)
 end
 
@@ -1270,10 +1264,15 @@ static constant k_dacAvgLenSecs = 0.2	//2 //number of seconds to average
 
 
 //runs input-side and output-side calibration, stores calibration results for teensy GUI to send to teensy upon start / continue
-function teensyCal_doCals(statsRefStartStr,[skipCalAndForceSavingThisWv,portIsConnected])
+function teensyCal_doCals(comStr,statsRefStartStr,[skipCalAndForceSavingThisWv,portIsConnected])
+	String comStr		//teensy communication port
 	String statsRefStartStr			//pass "" for default name, which is date specific
 	WAVE skipCalAndForceSavingThisWv
-	int portIsConnected		//pass 1 if port is connected. Will keep it so. Otherwise pass 0, in which case automatically connects to ks_teensyCom and disconnects after
+	int portIsConnected		//pass 1 if port is connected. Will keep it so. Otherwise pass 0, in which case automatically connects to comStr and disconnects after
+	
+	if (strlen(comStr) < 1)
+		comStr = ks_teensyCom
+	endif
 	
 	int doCal = PAramIsDefault(skipCalAndForceSavingThisWv)
 	portIsConnected = paramisdefault(portIsConnected) ? 0 : portIsConnected
@@ -1287,17 +1286,17 @@ function teensyCal_doCals(statsRefStartStr,[skipCalAndForceSavingThisWv,portIsCo
 	String inputStatsRef=statsRefStartStr+"_input_dac0",outputStatsRef=statsRefStartStr+"_output"
 	if (doCal)
 		print "teensyCal_doCals() starting teensyCal_inputCal()"
-		WAVE inputCalWv = teensyCal_inputCal(inputStatsRef,portIsConnected)		//currently running on dac0 by default, others not configured
+		WAVE inputCalWv = teensyCal_inputCal(comStr,inputStatsRef,portIsConnected)		//currently running on dac0 by default, others not configured
 		print "teensyCal_doCals() starting teensyCal_outputCal() in 3 seconds..."
 		sleep/s 1
-		WAVE outputCalWv = teensyCal_outputCal(outputStatsRef,portIsConnected)
+		WAVE outputCalWv = teensyCal_outputCal(comStr,outputStatsRef,portIsConnected)
 		concatenate/dl/np=(0)/free/o {inputCalWv,outputCalWv},calWvs_combined
 	else
 		duplicate/o/free skipCalAndForceSavingThisWv,calWvs_combined
 	endif
 
 	//store calibration data in a folder  -- may have to build folder since panel may not exist
-	String panelN = "teensy_clamp_" + ks_teensyCom
+	String panelN = "teensy_clamp_" + comStr
 	String folderPath = "root:Packages:"+panelN
 	NewDataFolder/o root:Packages
 	newDataFolder/o $folderPath
@@ -1315,9 +1314,14 @@ function teensyCal_doCals(statsRefStartStr,[skipCalAndForceSavingThisWv,portIsCo
 	note calibrationWv,"inputStatsRef:"+inputStatsRef+";outputStatsRef:"+inputStatsRef+";"
 end
 
-function/wave teensyCal_inputCal(statsRef,portIsConnected)
+function/wave teensyCal_inputCal(comStr,statsRef,portIsConnected)
+	String comStr
 	String statsRef		//save results. also displays to 
 	int portIsConnected
+	
+	if (strlen(comStr) < 1)
+		comStr = ks_teensyCom
+	endif
 	
 	Variable input_membrane_mV_per_amplifier_V = 1000/input_amplifier_mV_per_membrane_mV		//easier to invert and convert to mV membrane potential per V amplifier change since we can read that in raw volts
 	
@@ -1333,10 +1337,10 @@ function/wave teensyCal_inputCal(statsRef,portIsConnected)
 	
 	//connect to teensy and ensure that it is not in running mode
 	if (!portIsConnected)
-		vdtoperationsport2 $ks_teensyCom;VDT2/P=$ks_teensyCom baud=k_comBaud;
+		vdtoperationsport2 $comStr;VDT2/P=$comStr baud=k_comBaud;
 	endif
 	
-	int off = teensyCal_setRunningModeOffDuringExecution()
+	int off = teensyCal_setRunningModeOffDuringExecution(comStr)
 	if (!off)
 		print "teensyCal_inputCal() failed to set teensy running mode to off! calibration may fail / look like a flat relationship. May need to reload sketch onto teensy"
 	endif
@@ -1371,7 +1375,7 @@ function/wave teensyCal_inputCal(statsRef,portIsConnected)
 		doupdate;sleep/s k_waitAfterNewLevelSecs;doupdate;	//let things settle (shouldnt be strictly necessary)
 		daqmx_scan/DEV=ks_dacName/AVE=(k_dacAvgNum)/STRT=1/BKG/EOSH="print \"scan complete\""  WAVES=("cmdCopy,"+num2str(k_teensyCmdCopyChanNum)+";inputCopy,"+num2str(k_teensyInputCopyChanNum)+";")
 			//get and store teensy reads
-		WAVE teensyReadSet = teensyCal_getReadSet()		//get teensy reads
+		WAVE teensyReadSet = teensyCal_getReadSet(comStr)		//get teensy reads
 		WAVESTATS/q/w teensyReadSet; stats[i][][%teensyReads]=M_wavestats[q]
 			//get and store dac reads
 		daqErrors[i][2]  = fDAQmx_ScanWait(ks_dacName)	//wait til cmdCopy and inputCopy have been filled
@@ -1407,7 +1411,7 @@ function/wave teensyCal_inputCal(statsRef,portIsConnected)
 	endfor
 	
 	if (!portIsConnected)
-		vdtcloseport2 $ks_teensyCom
+		vdtcloseport2 $comStr
 	endif
 	
 	daqErrors[i][0] =fdaqmx_writechan(ks_dacName,k_teensyCmdChanNum,vEnd,rangeMinV,rangeMaxV)	//command the level as output -- not sure why but this isnt working
@@ -1434,12 +1438,17 @@ end
 
 
 //functions to read from the teensy
-function/WAVE teensyCal_getReadSet([outRef])
+function/WAVE teensyCal_getReadSet(comStr,[outRef])
+	String comStr
 	String outRef	//from command line, can copy into a real wave
+	
+	if (strlen(comStr) < 1)
+		comStr = ks_teensyCom
+	endif
 	
 	Variable i
 	for (i=0;i<k_teensyReadSetsToAvg;i++)
-		WAVE/I currReads = teensyCal_getReads()
+		WAVE/I currReads = teensyCal_getReads(comStr)
 		if (i==0)
 			duplicate/o/free/i currReads,out
 		else
@@ -1454,9 +1463,14 @@ function/WAVE teensyCal_getReadSet([outRef])
 	duplicate/o out,$outRef
 end
 
-function/WAVE teensyCal_getReads()
+function/WAVE teensyCal_getReads(comStr)
+	String comStr
 	
-	VDT2/P=$ks_teensyCom killio	//delete and previous serial i/o
+	if (strlen(comStr) < 1)
+		comStr = ks_teensyCom
+	endif
+	
+	VDT2/P=$comStr killio	//delete and previous serial i/o
 	
 	make/o/d/n=(k_floatsPerStandardDataTransfer) sendWv; sendWv[0,1] = nan; sendWv[2] = 4; sendWv[3,] = nan;
 	int V_VDT = teensy_sendBinary(sendWv);
@@ -1473,8 +1487,14 @@ function/WAVE teensyCal_getReads()
 	return readWv
 end
 
-function teensyCal_setRunningModeOffDuringExecution()
-	VDT2/P=$ks_teensyCom killio	//delete and previous serial i/o
+function teensyCal_setRunningModeOffDuringExecution(comStr)
+	String comStr
+	
+	if (strlen(comStr) < 1)
+		comStr = ks_teensyCom
+	endif
+	
+	VDT2/P=$comStr killio	//delete and previous serial i/o
 	
 	make/o/d/n=(k_floatsPerStandardDataTransfer) sendWv; sendWv[0] = nan; sendWv[1,8] = 0; sendWv[9,] = nan;
 	int V_VDT = teensy_sendBinary(sendWv);
@@ -1490,9 +1510,14 @@ function teensyCal_setRunningModeOffDuringExecution()
 end
 
 
-function/WAVE teensyCal_outputCal(statsRef,portIsConnected)
+function/WAVE teensyCal_outputCal(comStr,statsRef,portIsConnected)
 	STring statsRef
 	int portIsConnected
+	String comStr
+	
+	if (strlen(comStr) < 1)
+		comstr = ks_teensycom
+	endif
 	
 	STring dispWinName = statsRef + "_outputCalWin"
 	
@@ -1503,10 +1528,10 @@ function/WAVE teensyCal_outputCal(statsRef,portIsConnected)
 	Variable numLevels = 2+ numAdditionalLevels		//vMin and vMax plus any additional
 	
 	if (!portIsConnected)
-		vdtoperationsport2 $ks_teensyCom;VDT2/P=$ks_teensyCom baud=k_comBaud;		//connect to teensy
+		vdtoperationsport2 $comstr;VDT2/P=$comstr baud=k_comBaud;		//connect to teensy
 	endif
 	
-	int off = teensyCal_setRunningModeOffDuringExecution()
+	int off = teensyCal_setRunningModeOffDuringExecution(comStr)
 	if (!off)
 		print "teensyCal_inputCal() failed to set teensy running mode to off! calibration may fail / look like a flat relationship. May need to reload sketch onto teensy"
 	endif
@@ -1582,7 +1607,7 @@ function/WAVE teensyCal_outputCal(statsRef,portIsConnected)
 	WAVE teensyReturn = teensyCal_writeOutputCalVal(-1,noRounding=1)		//pass an out of bounds number to break write mode	
 	
 	if (!portIsConnected)
-		vdtcloseport2 $ks_teensyCom	
+		vdtcloseport2 $comstr	
 	endif
 	
 	//fit line to input-output relation
@@ -1626,89 +1651,6 @@ function/WAVE teensyCal_writeOutputCalVal(val,[noRounding])
 	return returnWv
 end
 	
-
-function teensyCal_follow(statsRef,sinFreq,sinMin,sinMax)
-	String statsRef
-	Variable sinFreq		//sinusoid frequency in Hz
-	Double sinMin,sinMax	//minimum value of sine wave in V (-10,10 is max range; teensy is good at following -8 to 8)
-	
-	vdtoperationsport2 $ks_teensyCom;VDT2/P=$ks_teensyCom baud=k_comBaud;		//connect to teensy
-	Variable teensyInFollowMode = teensyCal_setFollowMode(1)				//put it in follow mode, hopefully
-	if (!teensyInFollowMode)
-		print "teensyCal_follow() teensy failed to enter follow mode, aborting"
-		return 0
-	endif
-	
-	//nidaq command parameters -- will just make one second of stimulus, but repeat it over and over for as many repeats as we want (set by numSecs)
-	Variable sampleFreq = 100000	//e.g., 100,000 Hz (100 kHz) sample freq.. listed limit is 250 kHz, but in Igor the nidaq driver gives back an error at 200 kHz, allows 100 kHz. havent tested others
-	Variable samplePeriod = 1/sampleFreq
-	Variable numSecs = 5
-	
-	Variable outputLengthSamples = numSecs * sampleFreq
-	
-	//build sine wave
-	Double sinMid = (sinMin + sinMax)/2
-	Double sinAmp = (sinMax - sinMin)/2
-		
-	make/o/d/n=(sampleFreq) sinTest
-	setscale/p x,0,samplePeriod,"s",sinTest
-	sinTest = sinMid + sinAmp*sin(2*pi*sinFreq*x)
-	
-	//set up to run this on DAC command pin, but dont start yet
-	Variable ok = fdaqmx_writechan(ks_dacName,k_teensyCmdChanNum,-8,-10,10)	//start off commanding a negative voltage as output, so that the sine wave (which starts half way between vMin and vMax is clear (hopefully)	
-	daqmx_waveformgen/dev=ks_dacName/bkg/strt=0 "sinTest, "+num2str(k_teensyCmdChanNum)+";"
-	
-	//set up to record inputs to and outputs from teensy as captured by the nidaq board, also setup display
-	String trigStr = "/" + ks_dacName + "/ao/starttrigger"		//passing this below tells nidaq board to record when waveform starts
-	
-	String recordingWvDescs = "cmdCopy;in;out;scaledOut;"	
-	WAVE/T recordingWvs = listToTextWave(recordingWvDescs,";")
-	dl_assignLblsFromList(recordingWvs,0,0,recordingWvDescs,"",0)
-	recordingWvs = statsRef +"_"+recordingWvs
-	
-	String winN = statsRef+"_win",desc,axisN
-	variable i,numRecs = dimsize(recordingWvs,0);string recwv
-	
-	//make recording waves and display
-	killwindow/Z $winN; display/k=1/n=$winN;winN = s_name
-	for (i=0;i<numRecs;i+=1)
-		desc = getdimlabel(recordingWvs,0,i)
-		axisN = "L_"+desc
-		recwv = recordingWvs[i]
-		make/o/d/n=(outputLengthSamples) $recwv
-		setscale/p x,0,samplePeriod,"s",$recwv
-		
-		appendtograph/l=$axisN $recwv/tn=$desc
-	endfor
-	doupdate;disp_arrayAxes(winN,"L*",0.04,"",rev=1)
-	modifygraph/w=$winN live=1		//live mode might be faster
-	setaxis/w=$winN L_cmdCopy,-10,10
-	setaxis/w=$winN L_in,-0.2,3.5
-	setaxis/w=$winN L_out,-0.2,3.5
-	setaxis/w=$winN L_scaledOut,-10,10
-	modifygraph/w=$winN freepos=0,lblpos=50,lsize(cmdCopy)=2,rgb(cmdCopy)=(0,0,0),rgb(in)=(26214,26214,26214),rgb(scaledOut)=(26214,0,0)
-
-	doupdate;
-	
-	String scanWvStr=recordingWvs[%cmdCopy]+","+num2str(k_teensyCmdCopyChanNum)+";"+recordingWvs[%in]+","+num2str(k_teensyInputCopyChanNum)+";"
-	scanWvStr += recordingWvs[%out]+","+num2str(k_teensyOutputCopyChanNum)+";"+recordingWvs[%scaledOut]+","+num2str(k_teensyScaledOutputCopyChanNum)+";"
-	Variable ok1 = fDAQmx_ScanStop(ks_dacName)		//assure not already scanning
-	daqmx_scan/DEV=ks_dacName/STRT=1/BKG/TRIG=(trigStr) WAVES=(scanWvStr)		//start scanning, but due to trigger actually waits for waveform gen to start
-	//print fDAQmx_ErrorString()
-	
-	//start command, which also starts acquisition due to /TRIG=(trigStr)
-	Variable ok2 = fdaqmx_waveformstart(ks_dacName,numSecs)
-	
-	Variable ok3 = fDAQmx_ScanWait(ks_dacName)	//wait til cmdCopy and "in" have been filled
-	
-	//turn teensy off follow mode once complete
-	Variable teensyOutOfFollowMode = teensyCal_setFollowMode(0)
-	
-	vdtcloseport2 $ks_teensyCom	
-	
-	setwindow $winN, hook(winHook_killWaves)=winHook_killWaves
-end
-
 function teensyCal_setFollowMode(on)
 	int on 		//1 for on, zero for off
 	
@@ -1717,6 +1659,95 @@ function teensyCal_setFollowMode(on)
 	sendWv[4,] = nan
 	teensy_sendBinary(sendWv);	//teensy does not respond in either case
 end
+
+//not used in GUI, must run from command line -- may be out of date!
+//function teensyCal_follow(comStr,statsRef,sinFreq,sinMin,sinMax)
+//	String comStr
+//	String statsRef
+//	Variable sinFreq		//sinusoid frequency in Hz
+//	Double sinMin,sinMax	//minimum value of sine wave in V (-10,10 is max range; teensy is good at following -8 to 8)
+//	
+//	if (strlen(comStr) < 1)
+//		comStr = ks_teensyCom
+//	endif
+//	
+//	vdtoperationsport2 $comStr;VDT2/P=$comStr baud=k_comBaud;		//connect to teensy
+//	Variable teensyInFollowMode = teensyCal_setFollowMode(1)				//put it in follow mode, hopefully
+//	if (!teensyInFollowMode)
+//		print "teensyCal_follow() teensy failed to enter follow mode, aborting"
+//		return 0
+//	endif
+//	
+//	//nidaq command parameters -- will just make one second of stimulus, but repeat it over and over for as many repeats as we want (set by numSecs)
+//	Variable sampleFreq = 100000	//e.g., 100,000 Hz (100 kHz) sample freq.. listed limit is 250 kHz, but in Igor the nidaq driver gives back an error at 200 kHz, allows 100 kHz. havent tested others
+//	Variable samplePeriod = 1/sampleFreq
+//	Variable numSecs = 5
+//	
+//	Variable outputLengthSamples = numSecs * sampleFreq
+//	
+//	//build sine wave
+//	Double sinMid = (sinMin + sinMax)/2
+//	Double sinAmp = (sinMax - sinMin)/2
+//		
+//	make/o/d/n=(sampleFreq) sinTest
+//	setscale/p x,0,samplePeriod,"s",sinTest
+//	sinTest = sinMid + sinAmp*sin(2*pi*sinFreq*x)
+//	
+//	//set up to run this on DAC command pin, but dont start yet
+//	Variable ok = fdaqmx_writechan(ks_dacName,k_teensyCmdChanNum,-8,-10,10)	//start off commanding a negative voltage as output, so that the sine wave (which starts half way between vMin and vMax is clear (hopefully)	
+//	daqmx_waveformgen/dev=ks_dacName/bkg/strt=0 "sinTest, "+num2str(k_teensyCmdChanNum)+";"
+//	
+//	//set up to record inputs to and outputs from teensy as captured by the nidaq board, also setup display
+//	String trigStr = "/" + ks_dacName + "/ao/starttrigger"		//passing this below tells nidaq board to record when waveform starts
+//	
+//	String recordingWvDescs = "cmdCopy;in;out;scaledOut;"	
+//	WAVE/T recordingWvs = listToTextWave(recordingWvDescs,";")
+//	dl_assignLblsFromList(recordingWvs,0,0,recordingWvDescs,"",0)
+//	recordingWvs = statsRef +"_"+recordingWvs
+//	
+//	String winN = statsRef+"_win",desc,axisN
+//	variable i,numRecs = dimsize(recordingWvs,0);string recwv
+//	
+//	//make recording waves and display
+//	killwindow/Z $winN; display/k=1/n=$winN;winN = s_name
+//	for (i=0;i<numRecs;i+=1)
+//		desc = getdimlabel(recordingWvs,0,i)
+//		axisN = "L_"+desc
+//		recwv = recordingWvs[i]
+//		make/o/d/n=(outputLengthSamples) $recwv
+//		setscale/p x,0,samplePeriod,"s",$recwv
+//		
+//		appendtograph/l=$axisN $recwv/tn=$desc
+//	endfor
+//	doupdate;disp_arrayAxes(winN,"L*",0.04,"",rev=1)
+//	modifygraph/w=$winN live=1		//live mode might be faster
+//	setaxis/w=$winN L_cmdCopy,-10,10
+//	setaxis/w=$winN L_in,-0.2,3.5
+//	setaxis/w=$winN L_out,-0.2,3.5
+//	setaxis/w=$winN L_scaledOut,-10,10
+//	modifygraph/w=$winN freepos=0,lblpos=50,lsize(cmdCopy)=2,rgb(cmdCopy)=(0,0,0),rgb(in)=(26214,26214,26214),rgb(scaledOut)=(26214,0,0)
+//
+//	doupdate;
+//	
+//	String scanWvStr=recordingWvs[%cmdCopy]+","+num2str(k_teensyCmdCopyChanNum)+";"+recordingWvs[%in]+","+num2str(k_teensyInputCopyChanNum)+";"
+//	scanWvStr += recordingWvs[%out]+","+num2str(k_teensyOutputCopyChanNum)+";"+recordingWvs[%scaledOut]+","+num2str(k_teensyScaledOutputCopyChanNum)+";"
+//	Variable ok1 = fDAQmx_ScanStop(ks_dacName)		//assure not already scanning
+//	daqmx_scan/DEV=ks_dacName/STRT=1/BKG/TRIG=(trigStr) WAVES=(scanWvStr)		//start scanning, but due to trigger actually waits for waveform gen to start
+//	//print fDAQmx_ErrorString()
+//	
+//	//start command, which also starts acquisition due to /TRIG=(trigStr)
+//	Variable ok2 = fdaqmx_waveformstart(ks_dacName,numSecs)
+//	
+//	Variable ok3 = fDAQmx_ScanWait(ks_dacName)	//wait til cmdCopy and "in" have been filled
+//	
+//	//turn teensy off follow mode once complete
+//	Variable teensyOutOfFollowMode = teensyCal_setFollowMode(0)
+//	
+//	vdtcloseport2 $comStr	
+//	
+//	setwindow $winN, hook(winHook_killWaves)=winHook_killWaves
+//end
+
 
 #endif	//end #if (exists("fdaqmx_writechan")) [automated calibration]
 
