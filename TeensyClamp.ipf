@@ -1,8 +1,15 @@
 ﻿#pragma TextEncoding = "UTF-8"
 #pragma rtGlobals=3		// Use modern global access method and strict wave access.
 #pragma IndependentModule = TeensyClamp // independent module, continues running even if code outside the module is uncompiled
+
+// Load NIDAQmx procedures (needed for autocalibration, if available)
+#if (exists("NIDAQmxWaveScanProcs"))	
 #include <NIDAQmxWaveScanProcs>				//Igor NIDAQ Tools MX required procedures
+#endif
+
+#if (exists("NIDAQmxWaveScanProcs"))	
 #include <NIDAQmxWaveFormGenProcs>
+#endif
 
 //---Teensy dynamic clamp--- see https://github.com/gs-b/flex_dynamic_clamp
 
@@ -1754,7 +1761,7 @@ end
 
 //HELPER FUNCTIONs
 
-threadsafe function teensy_bytesAvailable(comStr)
+function teensy_bytesAvailable(comStr)
 	String comStr
 	if (strlen(comStr) < 1)
 		comstr = ks_teensycom
